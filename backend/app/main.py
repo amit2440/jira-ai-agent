@@ -1,12 +1,37 @@
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from .config import ALLOWED_ORIGINS, operating_mode
+from .config import ALLOWED_ORIGINS, DATA_DIR, operating_mode
 from .database import add_document, documents, get_run, init_db
 from .graph.builder import build_graph
 from .logging.logger import agent_logger
 from .models import ApprovalRequest, ChatRequest, KnowledgeDocument, RunRequest
 from .workflow import approve, chat, start
+
+
+def _auto_ingest() -> None:
+    chroma_dir = DATA_DIR / "chroma_db"
+    if chroma_dir.exists() and any(chroma_dir.iterdir()):
+        agent_logger.info("[STARTUP] Chroma DB present — skipping auto-ingest.")
+        return
+    agent_logger.info("[STARTUP] Chroma DB missing — starting BRD auto-ingest in background...")
+    script = Path(__file__).resolve().parent.parent / "scripts" / "ingest_brd.py"
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script), "--project-key", "EOMS"],
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode == 0:
+            agent_logger.info("[STARTUP] Auto-ingest complete.")
+        else:
+            agent_logger.error(f"[STARTUP] Auto-ingest failed:\n{result.stderr}")
+    except Exception as exc:
+        agent_logger.error(f"[STARTUP] Auto-ingest exception: {exc}")
 
 app = FastAPI(title="EOMS Requirements Intelligence Assistant", version="2.0.0")
 app.add_middleware(
@@ -25,6 +50,7 @@ def startup() -> None:
         "[STARTUP] EOMS Requirements Intelligence Assistant v2.0 initialised — "
         "5-flow routing: rag_qa | jira_qa | hybrid_qa | ticket | report"
     )
+    threading.Thread(target=_auto_ingest, daemon=True).start()
 
 
 @app.get("/health")
