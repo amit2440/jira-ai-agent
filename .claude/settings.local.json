@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rtk wc *)",
+      "Bash(rtk read *)",
+      "Bash(rtk grep *)",
+      "Bash(rtk npm *)",
+      "Bash(grep -v '`')",
+      "Bash(python -m py_compile app/database.py app/models.py app/retrievers/bm25.py app/retrievers/hybrid.py app/tools/retrieval.py app/workflow.py app/main.py)",
+      "Bash(.venv/bin/python -m py_compile app/database.py app/models.py app/retrievers/bm25.py app/retrievers/hybrid.py app/tools/retrieval.py app/workflow.py app/main.py)",
+      "Bash(rtk find *)",
+      "Bash(rtk ls *)",
+      "Bash(sqlite3 /Users/amitraut/langgraph-workspace/AI-Agent-JIRA/backend/assistant.db \"SELECT id, title, project_key FROM knowledge;\")",
+      "Bash(.venv/bin/python -m py_compile app/retrievers/vector.py app/retrievers/hybrid.py scripts/ingest_brd.py)",
+      "Bash(.venv/bin/python scripts/ingest_brd.py --project-key EOMS)",
+      "Bash(awk -F: '{print $1}')",
+      "Bash(sed -i '' 's/answer_from_rag\\(run\\\\.text, docs, _run=run\\)/answer_from_rag\\(run.text, docs, _run=run, project_key=run.project_key\\)/g' /Users/amitraut/langgraph-workspace/AI-Agent-JIRA/backend/app/workflow.py)",
+      "Bash(sed -i '' 's/answer_from_jira\\(run\\\\.text, jira_docs, _run=run\\)/answer_from_jira\\(run.text, jira_docs, _run=run, project_key=run.project_key\\)/g' /Users/amitraut/langgraph-workspace/AI-Agent-JIRA/backend/app/workflow.py)",
+      "Bash(sed -i '' 's/answer_hybrid\\(run\\\\.text, brd_docs, jira_docs, _run=run\\)/answer_hybrid\\(run.text, brd_docs, jira_docs, _run=run, project_key=run.project_key\\)/g' /Users/amitraut/langgraph-workspace/AI-Agent-JIRA/backend/app/workflow.py)",
+      "Bash(.venv/bin/python -m py_compile app/retrievers/vector.py app/agents/qa.py app/prompts/qa_templates.py app/workflow.py)",
+      "Bash(.venv/bin/python -c ' *)",
+      "Bash(.venv/bin/python -m py_compile app/workflow.py)",
+      "Bash(.venv/bin/python -m py_compile app/workflow.py app/database.py app/retrievers/vector.py)",
+      "Bash(.venv/bin/python -m py_compile app/tools/jira.py app/workflow.py)",
+      "Bash(awk '/0f9787a6-10b5-4cfe-9a84-b64e4917cbd9/{print NR\": \"$0}' /Users/amitraut/langgraph-workspace/AI-Agent-JIRA/backend/logs/agent.log)",
+      "Bash(rtk git *)",
+      "Bash(git check-ignore *)"
+    ]
+  }
+}

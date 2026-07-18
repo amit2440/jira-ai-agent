@@ -1,0 +1,13 @@
+.venv
+__pycache__
+*.pyc
+*.pyo
+.env
+logs/
+exports/
+runs.db
+assistant.db
+chroma_db/
+tests/
+*.log
+.pytest_cache

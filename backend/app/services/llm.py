@@ -1,0 +1,225 @@
+"""
+LLM service — wraps Groq with exhaustive before/after logging.
+
+Logging strategy:
+  - Every call logs: agent_tag, task, model, temperature, prompt_chars, elapsed_ms, tokens
+  - At DEBUG level: full prompt text (first 2000 chars) and full raw response (first 1500 chars)
+  - Works even when _run=None — uses agent_logger directly with [THREAD:no-run] tag
+  - WARNING emitted when running in demo/template mode (no Groq key configured)
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+import time
+from typing import Any
+
+from ..config import GROQ_API_KEY, GROQ_MODEL, TEMPERATURE, groq_enabled
+
+# Use the same named logger so all output lands in agent.log
+_log = logging.getLogger("agent")
+
+_NO_RUN_TAG = "[THREAD:no-run]"
+
+
+def _tid_or_none(run) -> str:
+    if run is not None:
+        return f"[THREAD:{run.thread_id}]"
+    return _NO_RUN_TAG
+
+
+def _extract_json(text: str) -> dict[str, Any]:
+    # Remove markdown code block wrappers if present (e.g. ```json ... ``` or ``` ... ```)
+    cleaned = re.sub(r"^```(?:json)?\n", "", text.strip(), flags=re.I)
+    cleaned = re.sub(r"\n```$", "", cleaned.strip())
+    
+    match = re.search(r"\{.*\}", cleaned, re.S)
+    if not match:
+        raise ValueError("Model response did not contain JSON")
+    
+    # Use strict=False to allow control characters (like raw newlines in multi-line strings)
+    return json.loads(match.group(), strict=False)
+
+
+def invoke_llm(
+    prompt: str,
+    *,
+    task: str = "structured",
+    max_tokens: int = 1200,
+    system: str | None = None,
+    _agent_tag: str = "llm",
+    _run=None,
+) -> dict[str, Any]:
+    """
+    Call the Groq LLM. Fully instrumented — logs before/after whether or not
+    a RunState is provided via _run.
+
+    _agent_tag: identifies the calling agent (e.g. 'ticket_generator', 'router')
+    _run: optional RunState for thread_id tagging
+    """
+    tid = _tid_or_none(_run)
+    
+    # Defaults
+    temperature = TEMPERATURE.get(task, 0.0)
+    top_p = None
+    top_k = None
+    
+    # Override from UI parameters if provided
+    if _run and getattr(_run, "llm_params", None):
+        params = _run.llm_params
+        if params.temperature is not None:
+            temperature = params.temperature
+        if params.max_tokens is not None:
+            max_tokens = params.max_tokens
+        if params.top_p is not None:
+            top_p = params.top_p
+
+    # ── DEMO MODE: no Groq key ─────────────────────────────────────────────────
+    if not groq_enabled():
+        _log.warning(
+            f"{tid} [LLM_CALL:{_agent_tag}] DEMO MODE — Groq API key not configured. "
+            f"task={task!r} model=demo-template — returning empty response."
+        )
+        return {
+            "content": "",
+            "model": "demo-template",
+            "temperature": temperature,
+            "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        }
+
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from langchain_groq import ChatGroq
+
+    # ── PRE-CALL LOGGING ──────────────────────────────────────────────────────
+    full_prompt = f"[SYSTEM]\n{system}\n\n[USER]\n{prompt}" if system else prompt
+    _log.debug(
+        f"{tid} [LLM_CALL:{_agent_tag}] "
+        f"ENTERING LLM — task={task!r} model={GROQ_MODEL!r} "
+        f"temperature={temperature} max_tokens={max_tokens} "
+        f"prompt_chars={len(full_prompt)} system_chars={len(system or '')}"
+    )
+    _log.debug(
+        f"{tid} [LLM_CALL:{_agent_tag}:PROMPT]\n"
+        f"{'─' * 60}\n{full_prompt[:2000]}\n{'─' * 60}"
+    )
+
+    # Emit via the high-level helper if run is available
+    if _run is not None:
+        try:
+            from ..logging.logger import log_llm_before
+            log_llm_before(
+                _run,
+                agent=_agent_tag,
+                task=task,
+                prompt_len=len(full_prompt),
+                model=GROQ_MODEL,
+                temperature=temperature,
+                prompt_preview=full_prompt,
+            )
+        except Exception as exc:
+            _log.debug(f"{tid} [LLM_CALL:{_agent_tag}] log_llm_before failed: {exc}")
+
+    # ── LLM INVOCATION ────────────────────────────────────────────────────────
+    kwargs = {}
+    if top_p is not None:
+        kwargs["top_p"] = top_p
+    # Note: Groq API does not support top_k, so we omit it to prevent TypeError
+
+    llm = ChatGroq(
+        api_key=GROQ_API_KEY,
+        model=GROQ_MODEL,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        model_kwargs=kwargs
+    )
+    messages = []
+    if system:
+        messages.append(SystemMessage(content=system))
+    messages.append(HumanMessage(content=prompt))
+
+    t0 = time.perf_counter()
+    response = llm.invoke(messages)
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+
+    raw_content = str(response.content)
+    usage = getattr(response, "response_metadata", {}).get("token_usage", {})
+    token_usage = {
+        "prompt_tokens": usage.get("prompt_tokens", 0),
+        "completion_tokens": usage.get("completion_tokens", 0),
+        "total_tokens": usage.get("total_tokens", 0),
+    }
+
+    # ── POST-CALL LOGGING ─────────────────────────────────────────────────────
+    summary = raw_content[:120].replace("\n", " ")
+    _log.info(
+        f"{tid} [LLM_DONE:{_agent_tag}] "
+        f"elapsed={elapsed_ms}ms "
+        f"tokens_total={token_usage['total_tokens']} "
+        f"(prompt={token_usage['prompt_tokens']} completion={token_usage['completion_tokens']}) "
+        f"model={GROQ_MODEL!r}"
+    )
+    _log.debug(
+        f"{tid} [LLM_DONE:{_agent_tag}:RESPONSE]\n"
+        f"{'─' * 60}\n{raw_content[:1500]}\n{'─' * 60}"
+    )
+
+    if _run is not None:
+        try:
+            from ..logging.logger import log_llm_after
+            log_llm_after(
+                _run,
+                agent=_agent_tag,
+                elapsed_ms=elapsed_ms,
+                tokens=token_usage,
+                summary=summary,
+                full_response=raw_content,
+            )
+        except Exception as exc:
+            _log.debug(f"{tid} [LLM_DONE:{_agent_tag}] log_llm_after failed: {exc}")
+
+    return {
+        "content": raw_content,
+        "model": GROQ_MODEL,
+        "temperature": temperature,
+        "token_usage": token_usage,
+    }
+
+
+def invoke_json(
+    prompt: str,
+    *,
+    task: str = "structured",
+    max_tokens: int = 1200,
+    system: str | None = None,
+    _agent_tag: str = "llm",
+    _run=None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    tid = _tid_or_none(_run)
+    result = invoke_llm(
+        prompt,
+        task=task,
+        max_tokens=max_tokens,
+        system=system,
+        _agent_tag=_agent_tag,
+        _run=_run,
+    )
+    if not result["content"]:
+        _log.warning(
+            f"{tid} [LLM_DONE:{_agent_tag}] Empty response — returning empty dict. "
+            f"Caller will use fallback."
+        )
+        return {}, result
+
+    try:
+        parsed = _extract_json(result["content"])
+        _log.debug(
+            f"{tid} [LLM_DONE:{_agent_tag}:JSON_PARSED] keys={list(parsed.keys())}"
+        )
+        return parsed, result
+    except (ValueError, json.JSONDecodeError) as exc:
+        _log.warning(
+            f"{tid} [LLM_DONE:{_agent_tag}] JSON parse failed: {exc} — "
+            f"response was: {result['content'][:300]!r}"
+        )
+        raise

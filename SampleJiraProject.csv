@@ -1,0 +1,21 @@
+Project Key,Summary,Issue Type,Priority,Status,Assignee,Reporter,Epic Name,Story Points,Labels,Component,Description
+EOMS,Create employee registration form,Story,High,Done,John Smith,Product Owner,Employee Registration,5,registration;frontend,Web Portal,Develop employee registration screen for new hires.
+EOMS,Validate mandatory employee details,Task,Medium,Done,Emily Davis,Product Owner,Employee Registration,3,validation,Backend,Validate required employee fields before submission.
+EOMS,Duplicate email validation not working,Bug,High,To Do,Michael Brown,QA Team,Employee Registration,2,bug;registration,Backend,Prevent duplicate employee email addresses.
+EOMS,Generate employee ID automatically,Story,High,To Do,John Smith,Product Owner,Employee Registration,5,automation,Backend,Generate unique employee IDs.
+EOMS,Create HR approval workflow,Story,Highest,In Progress,Sarah Wilson,Product Owner,HR Workflow,8,workflow,Workflow Engine,Implement HR approval process.
+EOMS,Add manager approval step,Task,Medium,To Do,Emily Davis,Product Owner,HR Workflow,3,approval,Workflow Engine,Add reporting manager approval before HR.
+EOMS,HR approval email not sent,Bug,High,To Do,Michael Brown,QA Team,HR Workflow,2,email;bug,Notifications,Approval notification emails are not received.
+EOMS,Upload employee documents,Story,High,In Progress,John Smith,Business Analyst,Document Management,8,documents,Document Service,Allow employees to upload required documents.
+EOMS,Validate supported file formats,Task,Medium,Done,Sarah Wilson,Business Analyst,Document Management,3,documents,Document Service,Allow only PDF JPG and PNG files.
+EOMS,Passport upload fails for files larger than 10 MB,Bug,Medium,To Do,Michael Brown,QA Team,Document Management,2,bug;upload,Document Service,Large file upload should display validation message.
+EOMS,Create laptop provisioning workflow,Story,High,To Do,Emily Davis,IT Manager,IT Asset Management,8,it-assets,IT Services,Request laptop after HR approval.
+EOMS,Integrate Active Directory account creation,Task,High,To Do,Sarah Wilson,IT Manager,IT Asset Management,5,ad;integration,IT Services,Automatically provision Active Directory accounts.
+EOMS,Assign mandatory onboarding courses,Story,Medium,To Do,John Smith,HR Team,Training Management,5,training,LMS,Assign learning modules to new employees.
+EOMS,Training dashboard for HR,Story,Medium,To Do,Emily Davis,HR Team,Reporting,5,dashboard,Reporting,Display onboarding completion status.
+EOMS,Generate onboarding progress report,Story,Medium,To Do,Sarah Wilson,Business Analyst,Reporting,5,reports,Reporting,Generate onboarding summary reports.
+EOMS,Export onboarding report to PDF,Task,Low,To Do,John Smith,Business Analyst,Reporting,3,pdf;export,Reporting,Allow HR to export reports.
+EOMS,Implement email notification service,Story,High,In Progress,Emily Davis,Product Owner,Notifications,5,email,Notification Service,Notify users during onboarding process.
+EOMS,Reminder emails are not triggered,Bug,Medium,To Do,Michael Brown,QA Team,Notifications,2,email;bug,Notification Service,Scheduled reminder emails are not sent.
+EOMS,Implement JWT authentication,Story,Highest,Done,Sarah Wilson,Security Team,Security,8,security,Authentication,Secure application using JWT tokens.
+EOMS,Password reset link expires immediately,Bug,High,In Progress,Michael Brown,QA Team,Security,3,bug;security,Authentication,Password reset link should remain valid for configured duration.
