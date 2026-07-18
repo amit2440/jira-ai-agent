@@ -93,18 +93,6 @@ def invoke_llm(
 
     # ── PRE-CALL LOGGING ──────────────────────────────────────────────────────
     full_prompt = f"[SYSTEM]\n{system}\n\n[USER]\n{prompt}" if system else prompt
-    _log.debug(
-        f"{tid} [LLM_CALL:{_agent_tag}] "
-        f"ENTERING LLM — task={task!r} model={GROQ_MODEL!r} "
-        f"temperature={temperature} max_tokens={max_tokens} "
-        f"prompt_chars={len(full_prompt)} system_chars={len(system or '')}"
-    )
-    _log.debug(
-        f"{tid} [LLM_CALL:{_agent_tag}:PROMPT]\n"
-        f"{'─' * 60}\n{full_prompt[:2000]}\n{'─' * 60}"
-    )
-
-    # Emit via the high-level helper if run is available
     if _run is not None:
         try:
             from ..logging.logger import log_llm_before
@@ -119,6 +107,13 @@ def invoke_llm(
             )
         except Exception as exc:
             _log.debug(f"{tid} [LLM_CALL:{_agent_tag}] log_llm_before failed: {exc}")
+    else:
+        _log.debug(
+            f"{tid} [LLM_CALL:{_agent_tag}] "
+            f"task={task!r} model={GROQ_MODEL!r} "
+            f"temperature={temperature} max_tokens={max_tokens} "
+            f"prompt_chars={len(full_prompt)}"
+        )
 
     # ── LLM INVOCATION ────────────────────────────────────────────────────────
     kwargs = {}
@@ -152,18 +147,6 @@ def invoke_llm(
 
     # ── POST-CALL LOGGING ─────────────────────────────────────────────────────
     summary = raw_content[:120].replace("\n", " ")
-    _log.info(
-        f"{tid} [LLM_DONE:{_agent_tag}] "
-        f"elapsed={elapsed_ms}ms "
-        f"tokens_total={token_usage['total_tokens']} "
-        f"(prompt={token_usage['prompt_tokens']} completion={token_usage['completion_tokens']}) "
-        f"model={GROQ_MODEL!r}"
-    )
-    _log.debug(
-        f"{tid} [LLM_DONE:{_agent_tag}:RESPONSE]\n"
-        f"{'─' * 60}\n{raw_content[:1500]}\n{'─' * 60}"
-    )
-
     if _run is not None:
         try:
             from ..logging.logger import log_llm_after
@@ -177,6 +160,12 @@ def invoke_llm(
             )
         except Exception as exc:
             _log.debug(f"{tid} [LLM_DONE:{_agent_tag}] log_llm_after failed: {exc}")
+    else:
+        _log.info(
+            f"{tid} [LLM_DONE:{_agent_tag}] "
+            f"elapsed={elapsed_ms}ms tokens={token_usage['total_tokens']} "
+            f"(prompt={token_usage['prompt_tokens']} completion={token_usage['completion_tokens']})"
+        )
 
     return {
         "content": raw_content,
