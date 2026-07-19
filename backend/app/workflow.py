@@ -44,10 +44,10 @@ def _stamp_ls_metadata(run: "RunState") -> None:
     except Exception:
         pass
 
-from .agents.qa import answer_from_jira, answer_from_rag, answer_hybrid, nl_to_jql
+from .agents.qa import answer_from_jira, answer_from_rag, answer_hybrid, expand_query, nl_to_jql
 from .agents.report import plan_report, review_report, write_report
 from .agents.router import route_request
-from .agents.ticket import enhance_requirement, generate_ticket
+from .agents.ticket import detect_contradictions, enhance_requirement, generate_ticket
 from .config import JIRA_PROJECT_KEY, operating_mode
 from .database import has_project_brd, log_execution, save_run
 from .retrievers.vector import has_project_vectors
@@ -66,7 +66,7 @@ from .logging.logger import (
     log_warning,
     track_node,
 )
-from .models import ChatRequest, ChatResponse, RunRequest, RunState, SourceRef
+from .models import ChatRequest, ChatResponse, PendingAction, RunRequest, RunState, SourceRef
 from .tools.export import report_export
 from .tools.jira import jira_create_ticket, jira_project_exists, jira_project_health, jira_search
 from .tools.pii import pii_validator
@@ -94,10 +94,11 @@ def _make_source_refs(docs: list[dict[str, Any]], source: str = "knowledge") -> 
     return [
         SourceRef(
             title=d.get("title", "Document"),
-            content=d.get("content", "")[:500],
+            content=d.get("content", ""),
             score=d.get("score"),
             bm25_score=d.get("bm25_score"),
             vector_score=d.get("vector_score"),
+            rerank_score=d.get("rerank_score"),
             source=source,
         )
         for d in docs
@@ -190,6 +191,29 @@ def chat(req: ChatRequest) -> ChatResponse:
     if validation_err:
         return validation_err
 
+    # ── PENDING ACTION (conversation continuity) ──────────────────────
+    # If the frontend sends a pending_action and the user replied affirmatively or "next",
+    # generate ONE focused ticket for the first gap and queue the rest.
+    if req.pending_action and req.pending_action.type == "generate_tickets":
+        _affirmatives = {"yes", "yep", "yeah", "sure", "ok", "okay", "go", "do it",
+                         "generate", "generate them", "create them", "proceed", "continue", "please",
+                         "next", "next one", "continue", "more"}
+        _t = run.text.strip().lower().rstrip("!.,")
+        if _t in _affirmatives or len(run.text.strip()) <= 20:
+            pa = req.pending_action
+            if pa.gaps:
+                first_gap = pa.gaps[0]
+                run.pending_gaps = pa.gaps[1:]   # remaining for cycling
+                run.pending_topic = pa.topic
+                topic_prefix = f"{pa.topic} " if pa.topic else ""
+                run.text = (
+                    f"Create a user story for: {first_gap}. "
+                    f"This is a missing {topic_prefix}requirement in the EOMS project."
+                )
+                log_decision(run, "pending_action", "generate_tickets",
+                             f"Intercept — generating ticket for '{first_gap}', "
+                             f"{len(run.pending_gaps)} remaining")
+
     # ── ROUTER ────────────────────────────────────────────────────────
     with track_node(run, "router", "Request routed", "router") as event:
         routing = route_request(run.text, _run=run)
@@ -234,16 +258,24 @@ def _rag_qa_flow(run: RunState) -> ChatResponse:
     """Answer from BRD knowledge documents via hybrid search."""
     _stamp_ls_metadata(run)
     log_state(run, "RAG_QA_START")
-    with track_node(run, "brd_retrieval", "BRD documents retrieved (BM25 + vector)", "tool"):
-        docs = hybrid_search_tool(run.text, limit=5, project_key=run.project_key)
+    with track_node(run, "brd_retrieval", "BRD documents retrieved (BM25 + vector + rerank)", "tool") as ev:
+        queries = expand_query(run.text, _run=run)
+        seen: dict[str, dict] = {}
+        for q in queries:
+            for doc in hybrid_search_tool(q, limit=8, project_key=run.project_key):
+                key = doc.get("id") or doc.get("title")
+                if key not in seen or doc.get("score", 0) > seen[key].get("score", 0):
+                    seen[key] = doc
+        docs = sorted(seen.values(), key=lambda d: d.get("rerank_score", d.get("score", 0)), reverse=True)[:8]
         run.retrieved_documents = docs
         bm25_count   = sum(1 for d in docs if d.get("bm25_score") is not None)
         vector_count = sum(1 for d in docs if d.get("vector_score") is not None)
-        run.events[-1].detail.update({
+        ev.detail.update({
             "documents":    [{"title": d["title"], "score": d.get("score")} for d in docs],
             "total":        len(docs),
             "bm25_count":   bm25_count,
             "vector_count": vector_count,
+            "query_variants": len(queries),
         })
     log_retrieval(run, len(docs), "brd_retrieval", titles=[d["title"] for d in docs])
 
@@ -346,11 +378,25 @@ def _hybrid_qa_flow(run: RunState) -> ChatResponse:
         })
     log_retrieval(run, len(brd_docs), "brd_retrieval", titles=[d["title"] for d in brd_docs])
 
-    # Step 2: Jira retrieval (health metrics for broad context)
-    with track_node(run, "jira_health", "Jira health metrics retrieved", "tool"):
-        jira_docs = jira_project_health(run.project_key)
-        run.events[-1].detail["jira_count"] = len(jira_docs)
-    log_retrieval(run, len(jira_docs), "jira_project_health")
+    # Step 2: Jira retrieval — fetch actual ticket summaries so LLM can match requirements 1:1
+    with track_node(run, "jira_search", "Jira tickets retrieved for coverage analysis", "tool") as ev:
+        jql = f"project = {run.project_key} ORDER BY updated DESC"
+        jira_result = jira_search(jql, max_results=50)
+        issues = jira_result.get("issues", [])
+        jira_docs = [
+            {
+                "title": f"{i['key']}: {i['summary']}",
+                "content": f"Key: {i['key']} | Status: {i.get('status', 'Unknown')} | Summary: {i['summary']}",
+                "source": "jira",
+            }
+            for i in issues
+        ]
+        # Fall back to health metrics if search returned nothing (demo mode with no issues)
+        if not jira_docs:
+            jira_docs = jira_project_health(run.project_key)
+        ev.detail["jira_count"] = len(jira_docs)
+        ev.detail["mode"] = jira_result.get("mode", "unknown")
+    log_retrieval(run, len(jira_docs), "jira_search", jql=jql)
 
     run.retrieved_documents = brd_docs + jira_docs
     log_context_snapshot(run, "HYBRID_QA_RETRIEVED")
@@ -369,6 +415,29 @@ def _hybrid_qa_flow(run: RunState) -> ChatResponse:
     save_run(run)
     log_run_end(run)
 
+    gaps = payload.get("gaps", [])
+    pending = None
+    if gaps:
+        import re as _re
+        # infer topic from the original question (security / performance / integration …)
+        _topic_patterns = {
+            "security": r"\b(security|auth|authentication|authorization|rbac|jwt|permission)\b",
+            "performance": r"\b(performance|sla|latency|throughput|scalability)\b",
+            "integration": r"\b(integrat|api|external|third.party|connect)\b",
+            "document": r"\b(document|upload|attach|file|storage)\b",
+        }
+        topic = ""
+        for _cat, _pat in _topic_patterns.items():
+            if _re.search(_pat, run.text, _re.I):
+                topic = _cat
+                break
+        pending = PendingAction(
+            type="generate_tickets",
+            description=f"Generate Jira stories for {len(gaps)} missing requirements",
+            gaps=gaps,
+            topic=topic,
+        )
+
     all_sources = _make_source_refs(brd_docs, "knowledge") + _make_source_refs(jira_docs, "jira")
     return ChatResponse(
         run_id=run.run_id, thread_id=run.thread_id,
@@ -377,6 +446,7 @@ def _hybrid_qa_flow(run: RunState) -> ChatResponse:
         sources=all_sources,
         events=run.events,
         model=run.model, total_tokens=run.total_tokens,
+        pending_action=pending,
     )
 
 
@@ -387,7 +457,17 @@ def _hybrid_qa_flow(run: RunState) -> ChatResponse:
 def _ticket_flow_as_chat(run: RunState) -> ChatResponse:
     """Run ticket generation and return draft awaiting approval."""
     _run_ticket_pipeline(run)
-    ticket = run.result.get("ticket", {})
+    # If this ticket was part of a gap-cycling sequence, carry forward the remaining gaps
+    next_pending = None
+    if run.pending_gaps:
+        remaining = run.pending_gaps
+        n = len(remaining)
+        next_pending = PendingAction(
+            type="generate_tickets",
+            description=f"Generate Jira stories for {n} more missing requirement{'s' if n != 1 else ''}",
+            gaps=remaining,
+            topic=run.pending_topic,
+        )
     return ChatResponse(
         run_id=run.run_id, thread_id=run.thread_id,
         flow=run.flow, status=run.status,
@@ -396,6 +476,7 @@ def _ticket_flow_as_chat(run: RunState) -> ChatResponse:
         events=run.events,
         model=run.model, total_tokens=run.total_tokens,
         error=run.error,
+        pending_action=next_pending,
     )
 
 
@@ -423,9 +504,17 @@ def _run_ticket_pipeline(run: RunState) -> None:
     _stamp_ls_metadata(run)
     effective_project = (run.project_key or JIRA_PROJECT_KEY or "").upper()
     log_state(run, "TICKET_ENHANCE")
-    with track_node(run, "retrieval", "BRD documents retrieved", "tool"):
-        run.retrieved_documents = hybrid_search_tool(run.text)
-        run.events[-1].detail["documents"] = [{"title": d["title"]} for d in run.retrieved_documents]
+    with track_node(run, "retrieval", "BRD documents retrieved (expanded + reranked)", "tool") as ev:
+        queries = expand_query(run.text, _run=run)
+        seen: dict[str, dict] = {}
+        for q in queries:
+            for doc in hybrid_search_tool(q, limit=8, project_key=run.project_key):
+                key = doc.get("id") or doc.get("title")
+                if key not in seen or doc.get("score", 0) > seen[key].get("score", 0):
+                    seen[key] = doc
+        run.retrieved_documents = sorted(seen.values(), key=lambda d: d.get("rerank_score", d.get("score", 0)), reverse=True)[:8]
+        ev.detail["documents"]      = [{"title": d["title"]} for d in run.retrieved_documents]
+        ev.detail["query_variants"] = len(queries)
     log_retrieval(run, len(run.retrieved_documents), "hybrid_rag",
                   titles=[d["title"] for d in run.retrieved_documents])
 
@@ -433,13 +522,40 @@ def _run_ticket_pipeline(run: RunState) -> None:
         enhanced, meta = enhance_requirement(run.text, _run=run)
         _add_tokens(run, meta)
 
+    # ── CONTRADICTION DETECTION ───────────────────────────────────────────────
+    with track_node(run, "contradiction_check", "Requirement checked against BRD", "function") as ev:
+        contradiction_analysis, c_meta = detect_contradictions(
+            enhanced, run.retrieved_documents, _run=run
+        )
+        _add_tokens(run, c_meta)
+        contradictions = contradiction_analysis.get("contradictions", [])
+        ambiguities = contradiction_analysis.get("ambiguities", [])
+        ev.detail.update({
+            "contradictions_found": len(contradictions),
+            "ambiguities_found": len(ambiguities),
+            "clarification_needed": contradiction_analysis.get("clarification_needed", False),
+        })
+        # Use BRD-grounded rewrite for ticket generation
+        grounded_text = contradiction_analysis.get("grounded_requirement", enhanced)
+
+    log_decision(
+        run, "contradiction_check",
+        f"contradictions={len(contradictions)} ambiguities={len(ambiguities)}",
+        "proceed" if not contradiction_analysis.get("clarification_needed") else "warn",
+    )
+
     log_state(run, "TICKET_GENERATE")
     with track_node(run, "ticket_generation", "Ticket draft ready", "function") as ev:
-        ticket, meta = generate_ticket(enhanced, run.retrieved_documents, _run=run)
+        ticket, meta = generate_ticket(grounded_text, run.retrieved_documents, _run=run)
+        # Embed contradiction analysis into the result for UI display
+        ticket["_contradictions"] = contradictions
+        ticket["_ambiguities"] = ambiguities
         run.result = {"ticket": ticket}
         _add_tokens(run, meta)
         ev.detail["confidence"] = ticket.get("confidence", "medium")
         ev.detail["ac_count"] = len(ticket.get("acceptance_criteria", []))
+        ev.detail["brd_coverage"] = ticket.get("brd_coverage", [])
+        ev.detail["contradictions_found"] = len(contradictions)
 
     log_state(run, "TICKET_GENERATED",
               summary=ticket.get("summary", "")[:80],
@@ -451,7 +567,7 @@ def _run_ticket_pipeline(run: RunState) -> None:
     save_run(run)
 
 
-_QUALITY_THRESHOLD = 0.85
+_QUALITY_THRESHOLD = 0.90
 _MAX_REVISIONS = 2
 
 

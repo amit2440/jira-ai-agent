@@ -38,6 +38,7 @@ def _fallback_report(text: str, refs: list[dict[str, Any]]) -> dict[str, Any]:
     context = "\n".join(f"- **{x['title']}**: {x.get('content', '')}" for x in refs)
     return {
         "title": "Project Status Report",
+        "is_fallback": True,
         "markdown": f"""# Project Status Report
 
 ## Executive Summary

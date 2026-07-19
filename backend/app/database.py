@@ -32,65 +32,12 @@ def init_db() -> None:
             "id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, thread_id TEXT, node TEXT, "
             "function_name TEXT, tool TEXT, payload TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
         )
-        # Seed baseline BRD knowledge if table is empty
-        if not conn.execute("SELECT 1 FROM knowledge LIMIT 1").fetchone():
-            conn.executemany(
-                "INSERT INTO knowledge (id, title, content, project_key) VALUES (?, ?, ?, NULL)",
-                [
-                    (
-                        "onboarding",
-                        "Employee Onboarding BRD",
-                        "New employees must complete account registration, email verification, "
-                        "profile setup, document upload, and mandatory onboarding training before accessing systems.",
-                    ),
-                    (
-                        "security",
-                        "Security Requirements BRD",
-                        "All authentication must use JWT tokens. Personal data must be encrypted in transit. "
-                        "PII must never appear in logs. Password reset links must remain valid for a configured duration.",
-                    ),
-                    (
-                        "jira_standards",
-                        "Jira Ticket Quality Standard",
-                        "Every Jira ticket requires: summary, business value statement, measurable acceptance criteria, "
-                        "priority (Low/Medium/High/Highest), component, and assigned team member.",
-                    ),
-                    (
-                        "accessibility",
-                        "Accessibility & Compliance BRD",
-                        "All customer-facing and HR-facing flows must meet WCAG 2.1 AA. "
-                        "Support keyboard navigation and screen readers across all browsers.",
-                    ),
-                    (
-                        "hr_workflow",
-                        "HR Approval Workflow BRD",
-                        "Employee registration requires sequential approvals: direct manager → HR team. "
-                        "Email notifications must be sent at each approval stage. "
-                        "Approval workflows must complete within 5 business days.",
-                    ),
-                    (
-                        "document_mgmt",
-                        "Document Management BRD",
-                        "Employees must upload identity documents (passport, national ID) and employment contracts. "
-                        "Supported formats: PDF, JPG, PNG. Maximum file size: 10MB. "
-                        "Documents must be stored securely with role-based access control.",
-                    ),
-                    (
-                        "it_provisioning",
-                        "IT Asset Provisioning BRD",
-                        "IT asset provisioning (laptop, email, Active Directory account) must be triggered "
-                        "automatically after HR approval. SLA: provisioned within 2 business days.",
-                    ),
-                    (
-                        "notifications",
-                        "Notification Service BRD",
-                        "Email notifications are required for: registration confirmation, approval requests, "
-                        "approval decisions, document submission, IT provisioning completion, and training assignments. "
-                        "Reminder emails must be sent for pending actions after 24 hours.",
-                    ),
-                ],
-            )
+        # No generic seed data — all knowledge must come from project-tagged BRD ingestion.
+        # Run scripts/ingest_brd.py --project-key <KEY> to populate the knowledge base.
         
+        # Remove old generic seed docs (project_key IS NULL) — they contaminate project-scoped queries.
+        # Real knowledge comes only from ingest_brd.py with explicit --project-key.
+        conn.execute("DELETE FROM knowledge WHERE project_key IS NULL")
         # Cleanup previously seeded CSV epics if they exist
         conn.execute("DELETE FROM knowledge WHERE id LIKE 'csv_epic_%'")
 def save_run(run: RunState) -> None:
@@ -120,7 +67,7 @@ def documents(project_key: str | None = None) -> list[dict]:
     with connection() as conn:
         if project_key:
             rows = conn.execute(
-                "SELECT * FROM knowledge WHERE project_key = ? OR project_key IS NULL",
+                "SELECT * FROM knowledge WHERE project_key = ?",
                 (project_key,),
             ).fetchall()
         else:

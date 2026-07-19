@@ -125,34 +125,134 @@ def jira_project_health(project_key: str | None = None) -> list[dict[str, Any]]:
     project = project_key or JIRA_PROJECT_KEY or "DEMO"
     if not jira_enabled():
         return [
-            {"title": "Open Defects", "content": "3 high priority bugs in checkout flow, 2 medium bugs in user profile.", "score": 1.0},
-            {"title": "Blockers", "content": "1 open blocker waiting on third-party API approval (DEMO-45).", "score": 1.0},
-            {"title": "Unanswered Comments", "content": "5 tickets have unanswered stakeholder comments.", "score": 1.0},
-            {"title": "Completed Items", "content": "12 stories completed this sprint, velocity is stable.", "score": 1.0},
-            {"title": "Project Health", "content": "Overall health is GREEN. Sprint on track despite minor API delays.", "score": 1.0},
+            {"title": "Issue Counts", "content": "Total: 20 | Open: 14 | In Progress: 4 | Done: 6 | Stories: 12 | Bugs: 5 | Tasks: 3", "score": 1.0},
+            {"title": "Open Bugs by Priority", "content": "Critical: 1 (DEMO-15) | High: 2 (DEMO-23, DEMO-31) | Medium: 2 (DEMO-18, DEMO-27) | Low: 0", "score": 1.0},
+            {"title": "Blockers", "content": "1 blocker: DEMO-45 — Waiting for third-party AD API approval.", "score": 1.0},
+            {"title": "Completed Items", "content": "6 items completed. Recent: DEMO-10 (Login flow), DEMO-11 (User registration), DEMO-12 (Role assignment UI).", "score": 1.0},
+            {"title": "Health Indicators", "content": "Completion rate: 30%. Open bugs: 5. Active blockers: 1. Sprint velocity: stable.", "score": 1.0},
         ]
-        
+
     url = f"{JIRA_BASE_URL.rstrip('/')}/rest/api/3/search/jql"
     auth = (JIRA_EMAIL, JIRA_API_TOKEN)
-    
-    # Mocking the aggregation by doing a basic search for the POC, but formatting as metrics
-    jql = f"project = {project} ORDER BY updated DESC"
-    payload = {"jql": jql, "maxResults": 20, "fields": ["summary", "status", "issuetype"]}
+
     try:
         with httpx.Client(timeout=30.0) as client:
-            response = client.post(url, json=payload, auth=auth)
-            response.raise_for_status()
-            data = response.json()
-            
-        issues = data.get("issues", [])
-        total = len(issues)
-        done = len([i for i in issues if i["fields"]["status"]["name"] == "Done"])
-        bugs = len([i for i in issues if i["fields"]["issuetype"]["name"] == "Bug" and i["fields"]["status"]["name"] != "Done"])
-        
+            # Sprint-scoped query — matches the Jira board view (current open sprint only).
+            # Falls back to all project issues if no open sprint exists.
+            sprint_jql = (
+                f"project = {project} AND issuetype != Epic "
+                f"AND sprint in openSprints() ORDER BY updated DESC"
+            )
+            all_jql = f"project = {project} AND issuetype != Epic ORDER BY updated DESC"
+
+            sprint_resp = client.post(url, json={
+                "jql": sprint_jql, "maxResults": 100,
+                "fields": ["summary", "status", "issuetype", "priority", "labels", "key"],
+            }, auth=auth)
+
+            if sprint_resp.is_success and sprint_resp.json().get("issues"):
+                sprint_data = sprint_resp.json()
+                issues = sprint_data["issues"]
+                scope_label = "current sprint"
+            else:
+                # No open sprint — fall back to all project issues
+                all_resp = client.post(url, json={
+                    "jql": all_jql, "maxResults": 100,
+                    "fields": ["summary", "status", "issuetype", "priority", "labels", "key"],
+                }, auth=auth)
+                all_resp.raise_for_status()
+                all_data = all_resp.json()
+                issues = all_data["issues"]
+                scope_label = "all project issues"
+
+            # Blocker-priority open tickets
+            bresp = client.post(url, json={
+                "jql": f"project = {project} AND priority = Blocker AND statusCategory != Done ORDER BY updated DESC",
+                "maxResults": 10,
+                "fields": ["summary", "key", "status"],
+            }, auth=auth)
+            blockers = bresp.json().get("issues", []) if bresp.is_success else []
+
+        def _status(i):   return i["fields"]["status"]["name"]
+        def _type(i):     return i["fields"]["issuetype"]["name"]
+        def _priority(i): return (i["fields"].get("priority") or {}).get("name", "Unknown")
+
+        work_items  = issues
+        total       = len(work_items)
+        done_issues = [i for i in work_items if _status(i) in ("Done", "Closed", "Resolved")]
+        open_issues = [i for i in work_items if _status(i) not in ("Done", "Closed", "Resolved")]
+        in_progress = [i for i in open_issues if "progress" in _status(i).lower()]
+        open_bugs   = [i for i in open_issues if _type(i) == "Bug"]
+        stories     = [i for i in work_items if _type(i) == "Story"]
+        tasks       = [i for i in work_items if _type(i) == "Task"]
+
+        # Bug severity breakdown by priority
+        priorities = ["Critical", "Highest", "High", "Medium", "Low", "Lowest", "Unknown"]
+        bug_by_priority: dict[str, list[str]] = {p: [] for p in priorities}
+        for b in open_bugs:
+            p = _priority(b)
+            bucket = p if p in bug_by_priority else "Unknown"
+            bug_by_priority[bucket].append(b["key"])
+
+        sev_parts = []
+        for label, keys in [("Critical", bug_by_priority["Critical"] + bug_by_priority["Highest"]),
+                             ("High",     bug_by_priority["High"]),
+                             ("Medium",   bug_by_priority["Medium"]),
+                             ("Low",      bug_by_priority["Low"] + bug_by_priority["Lowest"])]:
+            sev_parts.append(f"{label}: {len(keys)}" + (f" ({', '.join(keys[:3])})" if keys else ""))
+
+        # Completed item names (last 5)
+        done_summaries = [f"{i['key']} — {i['fields']['summary'][:60]}" for i in done_issues[:5]]
+
+        # Blocker list
+        if blockers:
+            blocker_strs = [f"{b['key']} — {b['fields']['summary'][:80]}" for b in blockers]
+            blocker_content = f"{len(blockers)} blocker(s): " + "; ".join(blocker_strs)
+        else:
+            blocker_content = "No tickets with Blocker priority found."
+
+        completion_rate = round(len(done_issues) / total * 100) if total else 0
+
+        in_review = sum(1 for i in open_issues if "review" in _status(i).lower())
+        to_do     = sum(1 for i in open_issues if _status(i).lower() in ("to do", "open", "backlog"))
         return [
-            {"title": "Open Defects", "content": f"Found {bugs} open bugs.", "score": 1.0},
-            {"title": "Completed Items", "content": f"Found {done} completed items out of {total} recent issues.", "score": 1.0},
-            {"title": "Project Health", "content": "Live metrics extracted from Jira search.", "score": 1.0}
+            {
+                "title": "Issue Counts",
+                "content": (
+                    f"Scope: {scope_label} | "
+                    f"Total: {total} | To Do: {to_do} | In Progress: {len(in_progress)} | "
+                    f"In Review: {in_review} | Done: {len(done_issues)} | "
+                    f"Stories: {len(stories)} | Bugs: {len(open_bugs)} open | Tasks: {len(tasks)}"
+                ),
+                "score": 1.0,
+            },
+            {
+                "title": "Open Bugs by Priority",
+                "content": " | ".join(sev_parts) if sev_parts else "No open bugs.",
+                "score": 1.0,
+            },
+            {
+                "title": "Blockers",
+                "content": blocker_content,
+                "score": 1.0,
+            },
+            {
+                "title": "Completed Items",
+                "content": (
+                    f"{len(done_issues)} items completed ({completion_rate}% of {total}). "
+                    + ("Recent: " + "; ".join(done_summaries) if done_summaries else "None.")
+                ),
+                "score": 1.0,
+            },
+            {
+                "title": "Health Indicators",
+                "content": (
+                    f"Completion rate: {completion_rate}%. Open bugs: {len(open_bugs)}. "
+                    f"Active blockers: {len(blockers)}. In progress: {len(in_progress)}."
+                ),
+                "score": 1.0,
+            },
         ]
+
     except Exception as e:
         return [{"title": "Jira Error", "content": f"Failed to fetch Jira metrics: {str(e)}", "score": 1.0}]

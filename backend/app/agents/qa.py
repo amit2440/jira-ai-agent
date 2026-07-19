@@ -26,6 +26,12 @@ from ..prompts.qa_templates import (
 from ..services.llm import invoke_json, invoke_llm
 from ..services.tokens import token_budget
 
+_EXPAND_SYSTEM = (
+    "You are a search query expert. Given a question, generate 2 alternative phrasings "
+    "that capture the same intent using different vocabulary. "
+    "Return JSON with key: expansions (array of 2 strings). No explanations."
+)
+
 _log = logging.getLogger("agent")
 
 
@@ -33,6 +39,28 @@ def _tid(run) -> str:
     if run is not None:
         return f"[THREAD:{run.thread_id}]"
     return "[THREAD:no-run]"
+
+
+def expand_query(question: str, _run=None) -> list[str]:
+    """Return [original] + up to 2 LLM-generated alternate phrasings."""
+    try:
+        payload, _ = invoke_json(
+            f"Question: {question}",
+            task="extraction",
+            max_tokens=200,
+            system=_EXPAND_SYSTEM,
+            _agent_tag="query_expand",
+            _run=_run,
+        )
+        expansions = payload.get("expansions", [])
+        if isinstance(expansions, list) and expansions:
+            queries = [question] + [str(e) for e in expansions[:2] if str(e) != question]
+            preview = question[:60]
+            _log.debug(f"Query expansion: {len(queries)} variants for {preview!r}")
+            return queries
+    except Exception as exc:
+        _log.debug(f"Query expansion failed ({exc}) — using original query only")
+    return [question]
 
 
 def _fallback_answer(question: str, source: str) -> dict[str, Any]:
@@ -44,6 +72,7 @@ def _fallback_answer(question: str, source: str) -> dict[str, Any]:
         "sources_used": [],
         "data_points": [],
         "confidence": "low",
+        "is_fallback": True,
     }
 
 
@@ -84,12 +113,39 @@ def answer_from_rag(
             return _fallback_answer(question, "BRD"), meta
         meta["token_budget"] = budget
 
-        # Populate sources from retrieved docs; detect low confidence via "cannot find"
-        sources_used = [d["title"] for d in docs if d.get("title")]
-        low_confidence_phrases = ("cannot find", "not found", "no information", "not mentioned", "not covered", "unable to find")
-        confidence = "low" if any(p in text.lower() for p in low_confidence_phrases) else "high"
+        # Only surface sources the LLM actually cited — prevents phantom source refs
+        available_titles = [d["title"] for d in docs if d.get("title")]
+        sources_used = [t for t in available_titles if t.lower() in text.lower()]
+        if not sources_used:
+            sources_used = available_titles
 
-        payload = {"answer": text, "sources_used": sources_used, "confidence": confidence}
+        # Extract confidence level and explanation from the model's ## Confidence section.
+        # Falls back to keyword heuristic only when the section is absent.
+        confidence = "high"
+        confidence_explanation = ""
+        import re as _re
+        conf_match = _re.search(
+            r"##\s*Confidence\s*\n+.*?Level[:\s]+(\w+).*?Explanation[:\s]+([^\n]+)",
+            text,
+            _re.I | _re.S,
+        )
+        if conf_match:
+            level_word = conf_match.group(1).strip().lower()
+            confidence = level_word if level_word in ("high", "medium", "low") else "medium"
+            confidence_explanation = conf_match.group(2).strip()
+        else:
+            low_phrases = (
+                "cannot find", "not found", "no information", "not mentioned",
+                "not covered", "unable to find", "does not specify", "not specified",
+            )
+            confidence = "low" if any(p in text.lower() for p in low_phrases) else "high"
+
+        payload = {
+            "answer": text,
+            "sources_used": sources_used,
+            "confidence": confidence,
+            "confidence_explanation": confidence_explanation,
+        }
         _log.info(f"{tid} [RAG_QA] Answer ready — chars={len(text)} sources={len(sources_used)} confidence={confidence}")
         return payload, meta
     except Exception as exc:
@@ -217,6 +273,40 @@ def answer_hybrid(
         if not payload or "answer" not in payload:
             _log.warning(f"{tid} [HYBRID_QA] LLM returned no answer — using fallback")
             payload = _fallback_answer(question, "BRD + Jira")
+        payload.setdefault("confidence_explanation", "")
+
+        # Guard: parse ✅/❌ counts directly from the rendered markdown table.
+        # This is the only reliable source — JSON fields may be internally consistent
+        # but disagree with the actual table rows (e.g. model claims 7 rows but built 6).
+        import re as _re
+        answer_text = payload.get("answer", "")
+        table_covered = len(_re.findall(r'^\|[^|\n]*\|[^|\n]*✅', answer_text, _re.MULTILINE))
+        table_missing = len(_re.findall(r'^\|[^|\n]*\|[^|\n]*❌', answer_text, _re.MULTILINE))
+        table_total = table_covered + table_missing
+
+        gaps = payload.get("gaps", [])
+        json_covered = payload.get("covered_count", 0)
+        json_total = payload.get("total_count", 0)
+
+        # Use table-derived counts if they differ from what's in JSON
+        if table_total > 0 and (table_covered != json_covered or table_total != json_total):
+            _log.warning(
+                f"{tid} [HYBRID_QA] Count mismatch — table says {table_covered}/{table_total}, "
+                f"JSON says {json_covered}/{json_total}. Fixing from table."
+            )
+            pct = round(table_covered / table_total * 100) if table_total else 0
+            payload["covered_count"] = table_covered
+            payload["total_count"] = table_total
+            payload["coverage_pct"] = pct
+            # Patch the summary line in the markdown answer
+            gaps_list = ", ".join(gaps) if gaps else "none"
+            fixed = f"{table_covered} of {table_total} requirements are covered ({pct}%). Missing: {gaps_list}."
+            payload["answer"] = _re.sub(
+                r"\d+ of \d+ requirements? are covered \(\d+%\)[^.\n]*[.\n]?",
+                fixed + "\n",
+                answer_text,
+                count=1,
+            )
         meta["token_budget"] = budget
         _log.info(
             f"{tid} [HYBRID_QA] Answer ready — "

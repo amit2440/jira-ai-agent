@@ -20,7 +20,10 @@ def _get_vectorstore():
         if not CHROMA_DB_DIR.exists():
             _log.warning(f"Chroma DB not found at {CHROMA_DB_DIR}. Returning empty results.")
             return None
-        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        embeddings = HuggingFaceEmbeddings(
+            model_name="BAAI/bge-large-en-v1.5",
+            encode_kwargs={"normalize_embeddings": True},
+        )
         _vectorstore = Chroma(
             persist_directory=str(CHROMA_DB_DIR),
             embedding_function=embeddings
@@ -58,11 +61,14 @@ def vector_search(query: str, limit: int = 5, project_key: str | None = None) ->
             })
         return sorted(ranked, key=lambda x: x["score"], reverse=True)
 
+    # BGE-large asymmetric retrieval: prepend task instruction to query only (not to documents)
+    retrieval_query = f"Represent this sentence for searching relevant passages: {query}"
+
     try:
         if project_key:
             # Filter to docs tagged with this project_key; fall back to unfiltered if none found.
             results = vs.similarity_search_with_score(
-                query, k=limit, filter={"project_key": project_key}
+                retrieval_query, k=limit, filter={"project_key": project_key}
             )
             if not results:
                 # Docs ingested before project_key tagging — return nothing rather than wrong-project data.
@@ -73,7 +79,7 @@ def vector_search(query: str, limit: int = 5, project_key: str | None = None) ->
                 return []
             return _to_docs(results)
         else:
-            return _to_docs(vs.similarity_search_with_score(query, k=limit))
+            return _to_docs(vs.similarity_search_with_score(retrieval_query, k=limit))
     except Exception as exc:
         _log.error(f"Vector search failed: {exc}")
         return []

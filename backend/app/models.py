@@ -24,12 +24,21 @@ class LlmParams(BaseModel):
     # top_p and top_k omitted — no meaningful effect at low temperatures; Groq support inconsistent.
 
 
+class PendingAction(BaseModel):
+    """Tracks a deferred action the user can confirm with a short affirmative."""
+    type: str                          # "generate_tickets"
+    description: str                   # human-readable label shown in UI
+    gaps: list[str] = Field(default_factory=list)   # missing requirement names
+    topic: str = ""                    # category the gaps belong to (e.g. "security")
+
+
 class ChatRequest(BaseModel):
     """Single-turn chat message. Router auto-selects the flow."""
     text: str = Field(min_length=2, max_length=12000)
     project_key: str | None = "EOMS"
     session_id: str | None = None  # Reserved for future multi-turn support
     llm_params: LlmParams | None = None
+    pending_action: PendingAction | None = None  # set by frontend when user confirms a prior offer
 
 
 class TimelineEvent(BaseModel):
@@ -57,6 +66,9 @@ class RunState(BaseModel):
     model: str | None = None
     total_tokens: int = 0
     llm_params: LlmParams | None = None
+    # set when cycling through per-gap ticket generation
+    pending_gaps: list[str] = Field(default_factory=list)
+    pending_topic: str = ""
 
 
 class ApprovalRequest(BaseModel):
@@ -80,6 +92,7 @@ class SourceRef(BaseModel):
     score: float | None = None
     bm25_score: float | None = None
     vector_score: float | None = None
+    rerank_score: float | None = None
     source: str = "knowledge"  # "knowledge" | "jira"
 
 
@@ -105,3 +118,6 @@ class ChatResponse(BaseModel):
     model: str | None = None
     total_tokens: int = 0
     error: str | None = None
+
+    # Conversation continuity — set when the answer ends with a follow-up offer
+    pending_action: PendingAction | None = None

@@ -13,7 +13,12 @@ import json
 import logging
 from typing import Any
 
-from ..prompts.templates import TICKET_SYSTEM, ticket_prompt
+from ..prompts.templates import (
+    CONTRADICTION_SYSTEM,
+    TICKET_SYSTEM,
+    contradiction_prompt,
+    ticket_prompt,
+)
 from ..services.llm import invoke_json
 from ..services.tokens import token_budget
 from ..tools.pii import redact
@@ -123,10 +128,74 @@ def generate_ticket(
         }
 
 
-def enhance_requirement(text: str, _run=None) -> tuple[str, dict[str, Any]]:
+def detect_contradictions(
+    text: str,
+    refs: list[dict[str, Any]],
+    _run=None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """
-    Normalise / redact the requirement text before passing to ticket generation.
-    Currently a lightweight passthrough with PII redaction.
+    Compare user requirement against BRD sections to detect contradictions,
+    ambiguities, and wrong personas before ticket generation.
+
+    Returns (analysis_dict, meta) where analysis_dict contains:
+      contradictions, ambiguities, clarification_needed, grounded_requirement
+    """
+    tid = _tid(_run)
+    safe_text = redact(text)
+    context = "\n".join(f"- {x['title']}: {x['content'][:400]}" for x in refs)
+
+    _log.info(
+        f"{tid} [CONTRADICTION_DETECTOR] Checking requirement against "
+        f"{len(refs)} BRD sections"
+    )
+
+    try:
+        payload, meta = invoke_json(
+            contradiction_prompt(safe_text, context),
+            task="structured",
+            max_tokens=800,
+            system=CONTRADICTION_SYSTEM,
+            _agent_tag="contradiction_detector",
+            _run=_run,
+        )
+        payload.setdefault("contradictions", [])
+        payload.setdefault("ambiguities", [])
+        payload.setdefault("clarification_needed", False)
+        payload.setdefault("grounded_requirement", safe_text)
+
+        if payload["contradictions"]:
+            _log.info(
+                f"{tid} [CONTRADICTION_DETECTOR] Found {len(payload['contradictions'])} "
+                f"contradiction(s): "
+                + ", ".join(c.get("term", "?") for c in payload["contradictions"])
+            )
+        if payload["ambiguities"]:
+            _log.info(
+                f"{tid} [CONTRADICTION_DETECTOR] Found {len(payload['ambiguities'])} "
+                f"ambiguit(ies)"
+            )
+
+        return payload, meta
+
+    except Exception as exc:
+        _log.warning(f"{tid} [CONTRADICTION_DETECTOR] Failed: {exc!r} — skipping check")
+        return {
+            "contradictions": [],
+            "ambiguities": [],
+            "clarification_needed": False,
+            "grounded_requirement": redact(text),
+        }, {"model": "fallback", "token_usage": {"total_tokens": 0}}
+
+
+def enhance_requirement(
+    text: str,
+    refs: list[dict[str, Any]] | None = None,
+    _run=None,
+) -> tuple[str, dict[str, Any]]:
+    """
+    PII-redact and return the requirement. If BRD refs are provided and a
+    grounded_requirement was produced by detect_contradictions, callers should
+    pass that directly; this function handles the base case.
     """
     tid = _tid(_run)
     budget = token_budget("enhancement", text)
@@ -137,10 +206,6 @@ def enhance_requirement(text: str, _run=None) -> tuple[str, dict[str, Any]]:
         f"original_len={len(text)} redacted_len={len(safe_text)} "
         f"chars_removed={len(text) - len(safe_text)}"
     )
-    if len(text) != len(safe_text):
-        _log.debug(
-            f"{tid} [REQUIREMENT_ENHANCER] Text was mutated by PII redaction"
-        )
 
     return safe_text, {
         "model": "normalizer",
