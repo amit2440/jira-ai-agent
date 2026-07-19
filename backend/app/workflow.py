@@ -247,9 +247,11 @@ def _rag_qa_flow(run: RunState) -> ChatResponse:
         })
     log_retrieval(run, len(docs), "brd_retrieval", titles=[d["title"] for d in docs])
 
-    with track_node(run, "rag_qa_agent", "RAG answer generated", "function"):
+    with track_node(run, "rag_qa_agent", "RAG answer generated", "function") as ev:
         payload, meta = answer_from_rag(run.text, docs, _run=run, project_key=run.project_key)
         _add_tokens(run, meta)
+        ev.detail["confidence"] = payload.get("confidence", "high")
+        ev.detail["sources_count"] = len(payload.get("sources_used", []))
         run.result = {"answer": payload}
 
     run.status = "completed"
@@ -432,10 +434,12 @@ def _run_ticket_pipeline(run: RunState) -> None:
         _add_tokens(run, meta)
 
     log_state(run, "TICKET_GENERATE")
-    with track_node(run, "ticket_generation", "Ticket draft ready", "function"):
+    with track_node(run, "ticket_generation", "Ticket draft ready", "function") as ev:
         ticket, meta = generate_ticket(enhanced, run.retrieved_documents, _run=run)
         run.result = {"ticket": ticket}
         _add_tokens(run, meta)
+        ev.detail["confidence"] = ticket.get("confidence", "medium")
+        ev.detail["ac_count"] = len(ticket.get("acceptance_criteria", []))
 
     log_state(run, "TICKET_GENERATED",
               summary=ticket.get("summary", "")[:80],

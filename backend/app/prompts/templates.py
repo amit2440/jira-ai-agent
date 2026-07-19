@@ -13,7 +13,8 @@ ROUTER_SYSTEM = (
 
 TICKET_SYSTEM = (
     "You are a senior product analyst. Return JSON with keys: summary, description, "
-    "priority (Low/Medium/High), issue_type (must be exactly 'Story' or 'Task'), acceptance_criteria (array), labels (array of strings, no spaces)."
+    "priority (Low/Medium/High), issue_type (must be exactly 'Story' or 'Task'), acceptance_criteria (array), labels (array of strings, no spaces), "
+    "confidence (high|medium|low — how well the requirement maps to a concrete ticket based on the context provided)."
 )
 
 REPORT_PLANNER_SYSTEM = (

@@ -83,8 +83,14 @@ def answer_from_rag(
             _log.warning(f"{tid} [RAG_QA] LLM returned empty content — using fallback")
             return _fallback_answer(question, "BRD"), meta
         meta["token_budget"] = budget
-        payload = {"answer": text, "sources_used": [], "confidence": "high"}
-        _log.info(f"{tid} [RAG_QA] Answer ready — chars={len(text)}")
+
+        # Populate sources from retrieved docs; detect low confidence via "cannot find"
+        sources_used = [d["title"] for d in docs if d.get("title")]
+        low_confidence_phrases = ("cannot find", "not found", "no information", "not mentioned", "not covered", "unable to find")
+        confidence = "low" if any(p in text.lower() for p in low_confidence_phrases) else "high"
+
+        payload = {"answer": text, "sources_used": sources_used, "confidence": confidence}
+        _log.info(f"{tid} [RAG_QA] Answer ready — chars={len(text)} sources={len(sources_used)} confidence={confidence}")
         return payload, meta
     except Exception as exc:
         _log.warning(f"{tid} [RAG_QA] FAILED — {exc!r}. Using fallback.")

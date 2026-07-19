@@ -52,7 +52,12 @@ function getEventSummary(ev) {
     case "nl_to_jql":               return `NL → JQL: ${d.jql || "query generated"}`;
     case "requirement_enhancement": return "Requirement enhanced & PII redacted";
     case "ticket_retrieval":        return "BRD context retrieved for ticket";
-    case "ticket_generation":       return "Ticket draft generated";
+    case "ticket_generation": {
+      const conf = d.confidence || "medium";
+      const ac   = d.ac_count > 0 ? ` · ${d.ac_count} AC` : "";
+      const warn = conf === "low" ? " ⚠ low confidence" : "";
+      return `Ticket draft generated${ac}${warn}`;
+    }
     case "jira_create_ticket":      return `Ticket created${d.key ? `: ${d.key}` : ""}`;
     case "planner":                 return "Report structure planned";
     case "writer":                  return `Report draft written${d.revision != null ? ` (revision ${d.revision})` : ""}`;
@@ -70,7 +75,12 @@ function getEventSummary(ev) {
       const warn = d.quality_warning ? " — human review required" : " — auto-continue";
       return `${qs}${warn}`;
     }
-    case "rag_qa_agent":            return d.confidence ? `Answer generated · Confidence: ${d.confidence}` : "BRD answer generated";
+    case "rag_qa_agent": {
+      const conf = d.confidence || "high";
+      const srcs = d.sources_count > 0 ? ` · ${d.sources_count} sources` : "";
+      const warn = conf === "low" ? " ⚠ low confidence" : "";
+      return `BRD answer generated${srcs}${warn}`;
+    }
     case "jira_qa_agent":           return "Jira data answer generated";
     case "hybrid_qa_agent":         return "Gap analysis complete";
     case "report_export":           return `Report exported${d.path ? ` → ${d.path.split("/").pop()}` : ""}`;

@@ -91,6 +91,7 @@ def generate_ticket(
             payload.setdefault("issue_type", "Story")
             payload.setdefault("labels", ["ai-generated"])
             payload.setdefault("acceptance_criteria", [])
+            payload.setdefault("confidence", "medium")
 
         meta["token_budget"] = budget
 
