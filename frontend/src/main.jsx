@@ -224,7 +224,7 @@ function App() {
 
   // Fetch operating mode from /health on mount
   useEffect(() => {
-    fetch(`${API.replace("/api", "")}/health`)
+    fetch(`${API.replace("/api", "")}/health`, { headers: { "ngrok-skip-browser-warning": "true" } })
       .then(r => r.json())
       .then(data => setOpMode(data.mode))
       .catch(() => setOpMode("demo"));

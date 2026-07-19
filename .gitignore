@@ -10,3 +10,5 @@ frontend/dist/
 .env
 *.pyc
 temp.md
+.vercel
+.env*
