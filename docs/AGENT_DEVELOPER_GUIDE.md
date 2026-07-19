@@ -322,7 +322,8 @@ scores = bm25.get_scores(query) # for each doc: relevance score
 
 #### Vector Search (Semantic search) — `retrievers/vector.py`
 Vector search converts text into numerical vectors ("embeddings") so semantically similar text maps to nearby points in vector space.
-- Model: `all-MiniLM-L6-v2` (HuggingFace, runs locally, no API key needed)
+- Model: `BAAI/bge-large-en-v1.5` (1024-dim, HuggingFace, runs locally, no API key needed)
+- BGE query prefix applied: `"Represent this sentence for searching relevant passages: {query}"`
 - Vector store: [ChromaDB](https://www.trychroma.com/) (file-based, in `backend/chroma_db/`)
 - The BRD PDF is pre-ingested into Chroma via `backend/scripts/ingest_brd.py`
 
@@ -341,9 +342,15 @@ rrf_score(doc) = 1/(k + rank_bm25) + 1/(k + rank_vector)
 # k=60 is a constant that dampens the effect of very high ranks
 ```
 
-Documents that rank highly in *both* lists get the best combined score. The merged list keeps component scores (`bm25_score`, `vector_score`) for observability in the UI.
+Documents that rank highly in *both* lists get the best combined score. The merged list keeps component scores (`bm25_score`, `vector_score`, `rrf_score`) for observability in the UI.
 
-> **⚠️ Known limitation:** BM25 searches the SQLite `knowledge` table; vector search searches Chroma (ingested from the PDF). They are *different corpora*. Documents added via `/api/knowledge` are only searchable via BM25 — they are not embedded into Chroma.
+#### Cross-Encoder Reranker — `retrievers/hybrid.py`
+After RRF fusion, a cross-encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2`) scores each `(query, document)` pair directly and reorders the fused list. This is the most accurate relevance signal — more expensive but applied to a small candidate set (top 20).
+
+#### Query Expansion — `agents/qa.py`
+The LLM generates 2 alternate phrasings for the user's question. All 3 variants are searched independently, results deduplicated, then fused. Increases vocabulary coverage when the user's wording differs from the document's terminology.
+
+> **Note:** BM25 searches the SQLite `knowledge` table; vector search searches Chroma (ingested from the PDF). `ingest_brd.py` syncs both so they stay aligned. Documents added via `/api/knowledge` go to SQLite only — re-run the ingestion script to add them to Chroma.
 
 ---
 
@@ -473,19 +480,9 @@ Maximum number of tokens the LLM can generate in its response. The system uses *
 
 Setting this too low truncates responses (ticket JSON gets cut off mid-field). Setting it too high wastes tokens but doesn't hurt quality.
 
-### Top P (Nucleus Sampling)
+### Top P / Top K
 
-Controls **which tokens the model can choose from** at each step.
-
-- `top_p = 1.0` (default): model considers all possible next tokens
-- `top_p = 0.9`: model only considers tokens that together account for 90% of the probability mass — eliminates the "long tail" of unlikely tokens
-- Lower values = more focused and consistent; higher = more diverse
-
-**Works with Groq.** Useful to tune alongside temperature.
-
-### Top K — ❌ Not supported by Groq
-
-Top K limits the token vocabulary to the K most likely options at each step. **The Groq API does not accept this parameter** — sending it causes a `TypeError`. The slider is displayed for awareness but has zero effect. Top P is the equivalent mechanism you should use instead.
+These nucleus-sampling parameters are **not exposed** in the current UI or `LlmParams`. The system uses only Temperature and Max Tokens for tuning. The Groq API accepts `top_p` but not `top_k`; neither is currently wired to avoid unexpected quality degradation from UI experimentation.
 
 ---
 
@@ -675,4 +672,4 @@ The LLM is isolated in `services/llm.py`. To swap Groq for another provider:
 
 ---
 
-*Last updated: 2026-07-18 · Matches codebase version 2.0.0*
+*Last updated: 2026-07-19 · Matches codebase version 2.1.0*

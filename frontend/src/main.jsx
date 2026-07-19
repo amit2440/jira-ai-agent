@@ -283,6 +283,13 @@ function App() {
       { type: "assistant", busy: true, flow: null },
     ]);
 
+    const AFFIRMATIVES = new Set([
+      "yes", "yep", "yeah", "sure", "ok", "okay", "go", "do it",
+      "generate", "generate them", "create them", "proceed", "continue", "please",
+    ]);
+    const isAffirmative = AFFIRMATIVES.has(query.trim().toLowerCase().replace(/[!.,]+$/, ""))
+      || (lastPendingAction && query.trim().length <= 20);
+
     const payload = {
       text: query,
       project_key: projectKey,
@@ -290,6 +297,7 @@ function App() {
         temperature: parseFloat(temperature),
         max_tokens:  parseInt(maxTokens, 10),
       },
+      ...(isAffirmative && lastPendingAction ? { pending_action: lastPendingAction } : {}),
     };
 
     try {
@@ -366,6 +374,7 @@ function App() {
   const lastAssistantMsg = [...messages].reverse().find(m => m.type === "assistant" && m.response);
   const latestEvents = lastAssistantMsg?.response?.events || [];
   const lastFlow = lastAssistantMsg?.response?.flow || null;
+  const lastPendingAction = lastAssistantMsg?.response?.pending_action || null;
 
   /* Mode badge config */
   const modeMeta = {

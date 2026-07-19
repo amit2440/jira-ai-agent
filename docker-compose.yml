@@ -1,0 +1,42 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: ai-agent-jira-backend
+    container_name: jira-agent-backend
+    env_file: .env
+    environment:
+      DATA_DIR: /app/data
+      PORT: 8000
+    volumes:
+      - agent_data:/app/data
+      - hf_cache:/root/.cache/huggingface  # cache BGE-large model across restarts
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s  # allow time for first-boot BRD ingest
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: http://localhost:8000/api
+    image: ai-agent-jira-frontend
+    container_name: jira-agent-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  agent_data:
+    driver: local
+  hf_cache:
+    driver: local

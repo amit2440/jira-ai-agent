@@ -20,11 +20,17 @@ function renderInline(str) {
   });
 }
 
+function parseTableCells(row) {
+  return row.split("|").map(c => c.trim()).filter((_, i, a) => i > 0 && i < a.length - 1);
+}
+
 export function SimpleMarkdown({ text }) {
   if (!text) return null;
   const lines = text.split("\n");
   const nodes = [];
-  let listBuf = [];
+  let listBuf  = [];
+  let tableBuf = [];  // [{cells}] rows buffered before flush
+  let tableHdr = null;
   let key = 0;
 
   const flushList = () => {
@@ -34,36 +40,81 @@ export function SimpleMarkdown({ text }) {
     }
   };
 
+  const flushTable = () => {
+    if (!tableHdr && tableBuf.length === 0) return;
+    const hdrCells = tableHdr ? parseTableCells(tableHdr) : [];
+    nodes.push(
+      <div key={key++} className="md-table-wrap">
+        <table className="md-table">
+          {hdrCells.length > 0 && (
+            <thead>
+              <tr>{hdrCells.map((c, i) => <th key={i}>{renderInline(c)}</th>)}</tr>
+            </thead>
+          )}
+          <tbody>
+            {tableBuf.map((row, ri) => (
+              <tr key={ri}>
+                {parseTableCells(row).map((c, ci) => <td key={ci}>{renderInline(c)}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+    tableHdr = null;
+    tableBuf = [];
+  };
+
+  let prevWasTableRow = false;
+
   for (const line of lines) {
+    const isTableRow = /^\|/.test(line.trim());
+    const isSepRow   = /^\|[\s|:-]+\|$/.test(line.trim());
+
+    if (isTableRow) {
+      if (isSepRow) {
+        // separator — signals that prevWasTableRow was the header
+        prevWasTableRow = true;
+        continue;
+      }
+      if (!prevWasTableRow && tableHdr === null && tableBuf.length === 0) {
+        // first data row — treat as header
+        flushList();
+        tableHdr = line;
+      } else if (tableHdr !== null && tableBuf.length === 0 && !prevWasTableRow) {
+        // second row before sep — promote prev header to body, this becomes new header
+        tableBuf.push(tableHdr);
+        tableHdr = line;
+      } else {
+        tableBuf.push(line);
+      }
+      prevWasTableRow = true;
+      continue;
+    }
+
+    // non-table line — flush any pending table first
+    if (prevWasTableRow) {
+      flushTable();
+      prevWasTableRow = false;
+    }
+
     const h3   = line.match(/^###\s+(.*)/);
     const h2   = line.match(/^##\s+(.*)/);
     const h1   = line.match(/^#\s+(.*)/);
     const li   = line.match(/^[-*•]\s+(.*)/);
-    const bold = line.match(/^\*\*(.*)\*\*$/);
     const hr   = line.match(/^---+$/);
 
-    if (h3) {
-      flushList();
-      nodes.push(<h3 key={key++} className="md-h3">{renderInline(h3[1])}</h3>);
-    } else if (h2) {
-      flushList();
-      nodes.push(<h2 key={key++} className="md-h2">{renderInline(h2[1])}</h2>);
-    } else if (h1) {
-      flushList();
-      nodes.push(<h1 key={key++} className="md-h1">{renderInline(h1[1])}</h1>);
-    } else if (hr) {
-      flushList();
-      nodes.push(<hr key={key++} className="md-hr" />);
-    } else if (li) {
-      listBuf.push(<li key={key++} className="md-li">{renderInline(li[1])}</li>);
-    } else if (line.trim() === "") {
-      flushList();
-    } else {
-      flushList();
-      nodes.push(<p key={key++} className="md-p">{renderInline(line)}</p>);
-    }
+    if (h3)              { flushList(); nodes.push(<h3 key={key++} className="md-h3">{renderInline(h3[1])}</h3>); }
+    else if (h2)         { flushList(); nodes.push(<h2 key={key++} className="md-h2">{renderInline(h2[1])}</h2>); }
+    else if (h1)         { flushList(); nodes.push(<h1 key={key++} className="md-h1">{renderInline(h1[1])}</h1>); }
+    else if (hr)         { flushList(); nodes.push(<hr key={key++} className="md-hr" />); }
+    else if (li)         { listBuf.push(<li key={key++} className="md-li">{renderInline(li[1])}</li>); }
+    else if (line.trim() === "") { flushList(); }
+    else                 { flushList(); nodes.push(<p key={key++} className="md-p">{renderInline(line)}</p>); }
   }
+
   flushList();
+  flushTable();
   return <div className="md-content">{nodes}</div>;
 }
 
@@ -124,6 +175,57 @@ export function TypingIndicator({ flow }) {
 }
 
 /* ── Sources Panel ─────────────────────────────────────────────────────────── */
+function SourceItem({ s, index }) {
+  const [expanded, setExpanded] = useState(false);
+  const PREVIEW_LEN = 220;
+  const content = s.content || "";
+  const canExpand = content.length > PREVIEW_LEN;
+
+  return (
+    <div className={`source-item source-item--${s.source || "knowledge"}`}>
+      <div className="source-title">
+        <span className="source-icon">{s.source === "jira" ? "📌" : "📋"}</span>
+        <span className="source-title-text">{s.title}</span>
+        <span className="source-rank">#{index + 1}</span>
+      </div>
+
+      {/* Retrieval scores */}
+      <div className="source-scores">
+        {s.rerank_score != null && (
+          <span className="score-pill score-pill--rerank" title="Cross-encoder rerank score">
+            rerank {s.rerank_score.toFixed(3)}
+          </span>
+        )}
+        {s.bm25_score != null && (
+          <span className="score-pill score-pill--bm25" title="BM25 lexical score">
+            bm25 {s.bm25_score.toFixed(2)}
+          </span>
+        )}
+        {s.vector_score != null && (
+          <span className="score-pill score-pill--vec" title="Vector cosine similarity">
+            vec {(s.vector_score * 100).toFixed(0)}%
+          </span>
+        )}
+        {s.score != null && s.rerank_score == null && s.bm25_score == null && s.vector_score == null && (
+          <span className="score-pill" title="Relevance score">
+            score {(s.score * 100).toFixed(0)}%
+          </span>
+        )}
+      </div>
+
+      {/* Passage — collapsible */}
+      <div className="source-excerpt">
+        {expanded ? content : content.slice(0, PREVIEW_LEN) + (canExpand ? "…" : "")}
+      </div>
+      {canExpand && (
+        <button className="source-expand-btn" onClick={() => setExpanded(e => !e)}>
+          {expanded ? "Show less ▴" : "Show full passage ▾"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function SourcesPanel({ sources }) {
   const [open, setOpen] = useState(false);
   if (!sources || sources.length === 0) return null;
@@ -131,26 +233,11 @@ function SourcesPanel({ sources }) {
     <div className="sources-panel">
       <button className="sources-toggle" onClick={() => setOpen(o => !o)}>
         <span>{open ? "▾" : "▸"}</span>
-        {sources.length} source{sources.length !== 1 ? "s" : ""} referenced
+        {sources.length} BRD section{sources.length !== 1 ? "s" : ""} retrieved
       </button>
       {open && (
         <div className="sources-list">
-          {sources.map((s, i) => (
-            <div key={i} className={`source-item source-item--${s.source || "knowledge"}`}>
-              <div className="source-title">
-                <span className="source-icon">{s.source === "jira" ? "📌" : "📋"}</span>
-                {s.title}
-              </div>
-              {s.score != null && (
-                <div className="source-score">
-                  score {(s.score * 100).toFixed(0)}%
-                  {s.bm25_score != null && ` · bm25 ${(s.bm25_score * 100).toFixed(0)}%`}
-                  {s.vector_score != null && ` · vec ${(s.vector_score * 100).toFixed(0)}%`}
-                </div>
-              )}
-              <div className="source-excerpt">{s.content?.slice(0, 200)}{s.content?.length > 200 ? "…" : ""}</div>
-            </div>
-          ))}
+          {sources.map((s, i) => <SourceItem key={i} s={s} index={i} />)}
         </div>
       )}
     </div>
@@ -376,10 +463,15 @@ function ResultBanner({ response }) {
 }
 
 /* ── Confidence Badge ──────────────────────────────────────────────────────── */
-function ConfidenceBadge({ confidence }) {
+function ConfidenceBadge({ confidence, explanation }) {
   if (!confidence) return null;
   const cls = { high: "conf-high", medium: "conf-medium", low: "conf-low" }[confidence] || "conf-medium";
-  return <span className={`conf-badge ${cls}`}>{confidence} confidence</span>;
+  return (
+    <span className={`conf-badge ${cls}`} title={explanation || undefined}>
+      {confidence} confidence
+      {explanation && <span className="conf-explanation"> — {explanation}</span>}
+    </span>
+  );
 }
 
 /* ── Assistant Bubble ──────────────────────────────────────────────────────── */
@@ -398,11 +490,23 @@ export function AssistantBubble({ response, busy, onApprove, onReject }) {
         {/* Header row */}
         <div className="bubble-header">
           <FlowBadge flow={response.flow} />
-          {answer?.confidence && <ConfidenceBadge confidence={answer.confidence} />}
+          {answer?.confidence && (
+            <ConfidenceBadge
+              confidence={answer.confidence}
+              explanation={answer.confidence_explanation}
+            />
+          )}
           {response.total_tokens > 0 && (
             <span className="token-count">{response.total_tokens} tokens</span>
           )}
         </div>
+
+        {/* Fallback warning */}
+        {(answer?.is_fallback || draft?.is_fallback) && (
+          <div className="fallback-banner">
+            ⚠ LLM call failed — showing template fallback. Data may be incomplete or generic.
+          </div>
+        )}
 
         {/* Q&A answer — rendered as Markdown */}
         {answer?.answer && (
@@ -440,6 +544,18 @@ export function AssistantBubble({ response, busy, onApprove, onReject }) {
 
         {/* Result banner (post-approval) */}
         <ResultBanner response={response} />
+
+        {/* Next-gap prompt — shown when more gaps remain in the cycling sequence */}
+        {response.pending_action?.type === "generate_tickets" && response.pending_action.gaps?.length > 0 && (
+          <div className="next-gap-prompt">
+            <span className="next-gap-icon">▶</span>
+            <span>
+              {response.pending_action.gaps.length} more missing requirement{response.pending_action.gaps.length !== 1 ? "s" : ""}:{" "}
+              <em>{response.pending_action.gaps.slice(0, 3).join(", ")}{response.pending_action.gaps.length > 3 ? "…" : ""}</em>
+              . Say <strong>"next"</strong> to generate the next story.
+            </span>
+          </div>
+        )}
 
         {/* Sources */}
         <SourcesPanel sources={response.sources} />

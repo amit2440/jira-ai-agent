@@ -31,7 +31,14 @@
       "Bash(python3 -c \"from app.graph.builder import build_graph; g = build_graph\\(\\); print\\('OK'\\)\")",
       "Bash(.venv/bin/python3 -c \"from app.graph.builder import build_graph; g = build_graph\\(\\); print\\('OK'\\)\")",
       "Bash(rtk curl *)",
-      "Bash(rtk gain *)"
+      "Bash(rtk gain *)",
+      "Bash(python -c \"from backend.app.agents.ticket import detect_contradictions, enhance_requirement, generate_ticket; print\\('ticket.py OK'\\)\")",
+      "Bash(python3 -c ' *)",
+      "Bash(python -c \"from app.models import ChatRequest, ChatResponse, PendingAction; print\\('models OK'\\)\")",
+      "Bash(.venv/bin/python -c \"from app.models import ChatRequest, ChatResponse, PendingAction; print\\('models OK'\\)\")",
+      "Bash(.venv/bin/python -c \"from app.workflow import chat; print\\('workflow OK'\\)\")",
+      "Bash(.venv/bin/python -c \"from app.prompts.qa_templates import HYBRID_QA_SYSTEM; print\\('HYBRID prompt starts:', HYBRID_QA_SYSTEM[:80]\\)\")",
+      "Bash(.venv/bin/python -c \"from app.agents.qa import answer_hybrid; print\\('OK'\\)\")"
     ]
   }
 }
