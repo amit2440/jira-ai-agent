@@ -23,7 +23,7 @@ from ..prompts.qa_templates import (
     nl_to_jql_prompt,
     rag_qa_prompt,
 )
-from ..services.llm import invoke_json
+from ..services.llm import invoke_json, invoke_llm
 from ..services.tokens import token_budget
 
 _log = logging.getLogger("agent")
@@ -60,35 +60,31 @@ def answer_from_rag(
     context = "\n\n".join(
         f"[{i+1}] {d['title']}\n{d.get('content', '')}" for i, d in enumerate(docs)
     )
-    budget = token_budget("structured", question)
+    budget = token_budget("qa", question)  # falls back to {low:1200, med:2000, high:3000}; overridden by llm_params.max_tokens
 
     _log.info(
         f"{tid} [RAG_QA] Answering from BRD docs — "
         f"question_len={len(question)} docs={len(docs)} budget={budget}"
     )
     _log.debug(f"{tid} [RAG_QA] Question: {question!r}")
-    _log.debug(
-        f"{tid} [RAG_QA] Context ({len(docs)} docs):\n{context[:800]}"
-    )
+    _log.debug(f"{tid} [RAG_QA] Context ({len(docs)} docs):\n{context[:800]}")
 
     try:
-        payload, meta = invoke_json(
+        meta = invoke_llm(
             rag_qa_prompt(question, context, project_key=project_key),
-            task="structured",
+            task="planning",
             max_tokens=budget,
             system=RAG_QA_SYSTEM,
             _agent_tag="rag_qa",
             _run=_run,
         )
-        if not payload or "answer" not in payload:
-            _log.warning(f"{tid} [RAG_QA] LLM returned no answer — using fallback")
-            payload = _fallback_answer(question, "BRD")
+        text = meta.pop("content", "").strip()
+        if not text:
+            _log.warning(f"{tid} [RAG_QA] LLM returned empty content — using fallback")
+            return _fallback_answer(question, "BRD"), meta
         meta["token_budget"] = budget
-        _log.info(
-            f"{tid} [RAG_QA] Answer ready — "
-            f"confidence={payload.get('confidence','?')} "
-            f"sources={payload.get('sources_used', [])}"
-        )
+        payload = {"answer": text, "sources_used": [], "confidence": "high"}
+        _log.info(f"{tid} [RAG_QA] Answer ready — chars={len(text)}")
         return payload, meta
     except Exception as exc:
         _log.warning(f"{tid} [RAG_QA] FAILED — {exc!r}. Using fallback.")
@@ -109,7 +105,7 @@ def nl_to_jql(question: str, project_key: str, _run=None) -> tuple[str, str]:
     _log.debug(f"{tid} [NL_TO_JQL] Question: {question!r}")
 
     try:
-        payload, _ = invoke_json(
+        payload, meta = invoke_json(
             nl_to_jql_prompt(question, project_key),
             task="extraction",
             max_tokens=budget,
@@ -120,11 +116,11 @@ def nl_to_jql(question: str, project_key: str, _run=None) -> tuple[str, str]:
         jql = payload.get("jql", f"project = {project_key} ORDER BY updated DESC")
         explanation = payload.get("explanation", "")
         _log.info(f"{tid} [NL_TO_JQL] Generated JQL: {jql!r} — {explanation}")
-        return jql, explanation
+        return jql, explanation, meta
     except Exception as exc:
         fallback_jql = f"project = {project_key} ORDER BY updated DESC"
         _log.warning(f"{tid} [NL_TO_JQL] Failed ({exc!r}) — using fallback JQL: {fallback_jql!r}")
-        return fallback_jql, "Fallback: all recent issues"
+        return fallback_jql, "Fallback: all recent issues", {}
 
 
 # ── JIRA Q&A ──────────────────────────────────────────────────────────────────

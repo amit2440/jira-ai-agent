@@ -130,6 +130,7 @@ def write_report(
     plan: dict[str, Any],
     refs: list[dict[str, Any]],
     _run=None,
+    feedback: str = "",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     tid = _tid(_run)
     safe_text = redact(text)
@@ -149,7 +150,7 @@ def write_report(
     try:
         _log.debug(f"{tid} [REPORT_WRITER] Dispatching to LLM for report writing…")
         payload, meta = invoke_json(
-            writer_prompt(safe_text, plan, context),
+            writer_prompt(safe_text, plan, context, feedback=feedback),
             task="creative",
             max_tokens=budget,
             system=REPORT_WRITER_SYSTEM,
@@ -220,21 +221,22 @@ def review_report(
         if payload and "markdown" in payload:
             md_out = payload["markdown"]
             notes = payload.get("notes", [])
+            quality_score = float(payload.get("quality_score", 0.85))
             chars_delta = len(md_out) - len(md_input)
-            report = {**report, "markdown": md_out, "review_notes": notes}
+            report = {**report, "markdown": md_out, "review_notes": notes, "quality_score": quality_score}
             _log.info(
                 f"{tid} [REPORT_REVIEWER] Review complete — "
+                f"quality_score={quality_score:.2f} "
                 f"markdown_chars_out={len(md_out)} delta={chars_delta:+d} "
                 f"review_notes_count={len(notes)}"
             )
             if notes:
-                _log.debug(
-                    f"{tid} [REPORT_REVIEWER] Review notes: {notes}"
-                )
+                _log.debug(f"{tid} [REPORT_REVIEWER] Review notes: {notes}")
         else:
             _log.warning(
                 f"{tid} [REPORT_REVIEWER] Reviewer returned no markdown — keeping original draft"
             )
+            report = {**report, "quality_score": 0.85}
 
         meta["token_budget"] = budget
         return report, meta

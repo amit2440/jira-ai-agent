@@ -21,8 +21,7 @@ class RunRequest(BaseModel):
 class LlmParams(BaseModel):
     temperature: float | None = None
     max_tokens: int | None = None
-    top_p: float | None = None
-    # top_k is intentionally absent — Groq API does not support it.
+    # top_p and top_k omitted — no meaningful effect at low temperatures; Groq support inconsistent.
 
 
 class ChatRequest(BaseModel):

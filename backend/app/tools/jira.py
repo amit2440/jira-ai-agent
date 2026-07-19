@@ -12,6 +12,32 @@ def jira_create_ticket(ticket: dict[str, Any], project_key: str | None = None) -
     if not jira_enabled():
         return {"mode": "demo", "key": f"{project}-101", "url": None, "status": "created"}
 
+    adf_content = [
+        {
+            "type": "paragraph",
+            "content": [{"type": "text", "text": ticket.get("description", "")}],
+        }
+    ]
+    ac_items = ticket.get("acceptance_criteria", [])
+    if ac_items:
+        adf_content.append({
+            "type": "heading",
+            "attrs": {"level": 3},
+            "content": [{"type": "text", "text": "Acceptance Criteria"}],
+        })
+        adf_content.append({
+            "type": "bulletList",
+            "content": [
+                {
+                    "type": "listItem",
+                    "content": [
+                        {"type": "paragraph", "content": [{"type": "text", "text": str(ac)}]}
+                    ],
+                }
+                for ac in ac_items
+            ],
+        })
+
     payload = {
         "fields": {
             "project": {"key": project},
@@ -19,12 +45,7 @@ def jira_create_ticket(ticket: dict[str, Any], project_key: str | None = None) -
             "description": {
                 "type": "doc",
                 "version": 1,
-                "content": [
-                    {
-                        "type": "paragraph",
-                        "content": [{"type": "text", "text": ticket.get("description", "")[:8000]}],
-                    }
-                ],
+                "content": adf_content,
             },
             "issuetype": {"name": ticket.get("issue_type", "Story") if ticket.get("issue_type") in ["Story", "Task", "Epic"] else ("Task" if "bug" in str(ticket.get("issue_type", "")).lower() or "defect" in str(ticket.get("issue_type", "")).lower() else "Story")},
             "priority": {"name": ticket.get("priority", "Medium")},

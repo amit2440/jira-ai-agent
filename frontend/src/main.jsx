@@ -14,7 +14,71 @@ const SUGGESTIONS = [
   { icon: "📊", label: "Status Report", text: "Provide a comprehensive project status report for the EOMS project, including open defects by severity, current blockers, completed items, and overall health assessment." },
 ];
 
-const DEFAULT_PARAMS = { temperature: 0.0, maxTokens: 2000, topP: 1.0 };
+const DEFAULT_PARAMS = { temperature: 0.0, maxTokens: 2000 };
+
+/* ── Execution Trace helpers ─────────────────────────────────────────────── */
+const FLOW_LABELS = {
+  rag_qa: "BRD Q&A", jira_qa: "Jira Lookup",
+  hybrid_qa: "Gap Analysis", ticket: "Ticket Generation", report: "Status Report",
+};
+const NODE_ICONS = {
+  pii_validation:"🛡", project_validation:"🔑", router:"🧭",
+  brd_retrieval:"📄", hybrid_retrieval:"📄", jira_health:"📊",
+  jira_search:"🔍", nl_to_jql:"🔄", requirement_enhancement:"✏️",
+  ticket_retrieval:"📄", ticket_generation:"🎫", jira_create_ticket:"✅",
+  planner:"📋", writer:"✍️", reviewer:"👁", reflection_check:"🔁",
+  revision:"🔁", confidence_check:"📈", rag_qa_agent:"💬",
+  jira_qa_agent:"💬", hybrid_qa_agent:"💬", report_export:"📥",
+  human_approval:"👤", logging:"📝",
+};
+function getEventSummary(ev) {
+  const d = ev.detail || {};
+  switch (ev.node) {
+    case "pii_validation":          return "PII check passed";
+    case "project_validation":      return `Project validated${d.project_key ? `: ${d.project_key}` : ""}`;
+    case "router": {
+      const label = FLOW_LABELS[d.flow] || d.flow || "";
+      return `Intent detected: ${label}`;
+    }
+    case "brd_retrieval": {
+      const total = d.total ?? d.brd_count ?? d.documents?.length ?? 0;
+      const bm25  = d.bm25_count   != null ? ` · BM25: ${d.bm25_count}`    : "";
+      const vec   = d.vector_count  != null ? ` · Vector: ${d.vector_count}` : "";
+      return `Retrieved ${total} BRD sections${bm25}${vec}`;
+    }
+    case "hybrid_retrieval":        return "Retrieved BRD + Jira data";
+    case "jira_health":             return "Fetched Jira health metrics";
+    case "jira_search":             return `Jira search returned ${d.records ?? 0} issues`;
+    case "nl_to_jql":               return `NL → JQL: ${d.jql || "query generated"}`;
+    case "requirement_enhancement": return "Requirement enhanced & PII redacted";
+    case "ticket_retrieval":        return "BRD context retrieved for ticket";
+    case "ticket_generation":       return "Ticket draft generated";
+    case "jira_create_ticket":      return `Ticket created${d.key ? `: ${d.key}` : ""}`;
+    case "planner":                 return "Report structure planned";
+    case "writer":                  return `Report draft written${d.revision != null ? ` (revision ${d.revision})` : ""}`;
+    case "reviewer": {
+      const qs = d.quality_score != null ? ` · Quality: ${Math.round(d.quality_score * 100)}%` : "";
+      return `Report reviewed${qs}`;
+    }
+    case "reflection_check": {
+      if (d.decision === "writer") return `Quality ${d.quality_score != null ? Math.round(d.quality_score*100)+"% " : ""}— revising`;
+      return "Reflection check passed";
+    }
+    case "revision":                return ev.message || "Revision triggered";
+    case "confidence_check": {
+      const qs   = d.quality_score != null ? `Confidence: ${Math.round(d.quality_score * 100)}%` : "Confidence check";
+      const warn = d.quality_warning ? " — human review required" : " — auto-continue";
+      return `${qs}${warn}`;
+    }
+    case "rag_qa_agent":            return d.confidence ? `Answer generated · Confidence: ${d.confidence}` : "BRD answer generated";
+    case "jira_qa_agent":           return "Jira data answer generated";
+    case "hybrid_qa_agent":         return "Gap analysis complete";
+    case "report_export":           return `Report exported${d.path ? ` → ${d.path.split("/").pop()}` : ""}`;
+    case "human_approval":          return "Awaiting human approval";
+    case "logging":                 return "Execution finalised";
+    default:                        return ev.message || ev.node.replaceAll("_", " ");
+  }
+}
 
 /* ── Welcome Screen ──────────────────────────────────────────────────────── */
 function WelcomeScreen({ onSuggestion }) {
@@ -138,7 +202,6 @@ function App() {
   // LLM parameters (top_k removed — Groq does not support it)
   const [temperature, setTemperature] = useState(DEFAULT_PARAMS.temperature);
   const [maxTokens, setMaxTokens]     = useState(DEFAULT_PARAMS.maxTokens);
-  const [topP, setTopP]               = useState(DEFAULT_PARAMS.topP);
   const [projectKey, setProjectKey]   = useState("EOMS");
 
   const threadRef   = useRef(null);
@@ -174,13 +237,11 @@ function App() {
   function resetParams() {
     setTemperature(DEFAULT_PARAMS.temperature);
     setMaxTokens(DEFAULT_PARAMS.maxTokens);
-    setTopP(DEFAULT_PARAMS.topP);
   }
 
   const paramsAreDefault =
     parseFloat(temperature) === DEFAULT_PARAMS.temperature &&
-    parseInt(maxTokens, 10) === DEFAULT_PARAMS.maxTokens &&
-    parseFloat(topP) === DEFAULT_PARAMS.topP;
+    parseInt(maxTokens, 10) === DEFAULT_PARAMS.maxTokens;
 
   async function submit(text) {
     const query = (text || input).trim();
@@ -218,8 +279,6 @@ function App() {
       llm_params: {
         temperature: parseFloat(temperature),
         max_tokens:  parseInt(maxTokens, 10),
-        top_p:       parseFloat(topP),
-        // top_k intentionally omitted — Groq API does not support it
       },
     };
 
@@ -376,41 +435,6 @@ function App() {
             />
           </div>
 
-          <div className="sidebar-control">
-            <div className="control-header">
-              <span className="control-label">
-                Top P (nucleus)
-                <ParamBadge isDefault={parseFloat(topP) === DEFAULT_PARAMS.topP} />
-              </span>
-              <span className="control-value">{parseFloat(topP).toFixed(2)}</span>
-            </div>
-            <input
-              type="range" className="control-slider"
-              min="0" max="1" step="0.05"
-              value={topP} onChange={e => setTopP(e.target.value)}
-            />
-          </div>
-
-          {/* Top K — explicitly disabled because Groq does not support it */}
-          <div className="sidebar-control">
-            <div className="control-header">
-              <span className="control-label">
-                Top K
-                <span className="param-tag param-tag--disabled">unsupported</span>
-              </span>
-              <span className="control-value" style={{ opacity: 0.4 }}>—</span>
-            </div>
-            <input
-              type="range" className="control-slider"
-              min="1" max="100" step="1"
-              value={50}
-              disabled
-            />
-            <div className="param-note">
-              Top K is not supported by the Groq API and has no effect on output.
-              Nucleus sampling (Top P) is the recommended alternative.
-            </div>
-          </div>
 
           {!paramsAreDefault && (
             <button className="reset-btn" onClick={resetParams}>
@@ -440,8 +464,36 @@ function App() {
           </div>
         </div>
 
+        {/* Smart Run Summary */}
+        {latestEvents.length > 0 && (
+          <div className="sidebar-section sidebar-section--summary">
+            <div className="sidebar-section-title">
+              <span className="dot" style={{ background: "var(--green)" }} />Run Summary
+              {lastAssistantMsg?.response?.total_tokens > 0 && (
+                <span className="run-token-badge">
+                  {lastAssistantMsg.response.total_tokens.toLocaleString()} tokens
+                </span>
+              )}
+            </div>
+            <div className="run-summary-list">
+              {latestEvents.map((ev, i) => {
+                const compTok = ev.detail?.token_usage?.completion_tokens;
+                return (
+                  <div key={i} className="run-summary-item">
+                    <span className="run-summary-icon">{NODE_ICONS[ev.node] || "•"}</span>
+                    <span className="run-summary-text">{getEventSummary(ev)}</span>
+                    {compTok > 0 && (
+                      <span className="run-summary-tok">{compTok}</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* Graph */}
-        <div className="sidebar-section" style={{ flex: 1, display: "flex", alignItems: "flex-end" }}>
+        <div className="sidebar-section" style={{ flex: latestEvents.length > 0 ? 0 : 1, display: "flex", alignItems: "flex-end" }}>
           <button className="graph-btn" onClick={() => setShowGraph(true)}>
             🔀 View LangGraph Workflow
           </button>

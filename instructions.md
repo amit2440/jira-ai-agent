@@ -1,4 +1,4 @@
-# AI Requirements Assistant – Development Instructions
+# JIRA AI Agent – Development Instructions
 
 ## Objective
 Build a Proof of Concept (POC) that converts natural language into:

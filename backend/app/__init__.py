@@ -1,1 +1,1 @@
-"""AI Requirements Assistant backend."""
+"""JIRA AI Agent backend"""

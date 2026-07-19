@@ -333,6 +333,41 @@ body {
   color: var(--text-muted); flex-shrink: 0;
 }
 .event-message { font-size: 11px; color: var(--text); line-height: 1.4; margin-bottom: 4px; }
+.event-icon-sm { margin-right: 5px; font-size: 11px; }
+.event-tags-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.event-chip {
+  font-family: 'JetBrains Mono', monospace; font-size: 9px;
+  color: var(--text-muted); background: var(--surface3);
+  border: 1px solid var(--border); border-radius: 8px; padding: 1px 6px;
+}
+
+/* ── Left sidebar run summary panel ── */
+.sidebar-section--summary { padding-bottom: 8px; }
+.run-summary-list {
+  display: flex; flex-direction: column; gap: 5px;
+  max-height: 260px; overflow-y: auto;
+}
+.run-summary-item {
+  display: flex; align-items: flex-start; gap: 7px;
+  font-size: 11px; color: var(--text); line-height: 1.4;
+}
+.run-summary-item::before {
+  content: "✓";
+  color: var(--green); font-weight: 700; font-size: 10px;
+  flex-shrink: 0; margin-top: 1px;
+}
+.run-summary-icon { font-size: 11px; flex-shrink: 0; }
+.run-summary-text { color: var(--text-sub); flex: 1; }
+.run-token-badge {
+  margin-left: auto;
+  font-family: 'JetBrains Mono', monospace; font-size: 9px;
+  color: var(--accent); background: var(--accent-lt);
+  border: 1px solid var(--accent-bd); border-radius: 8px; padding: 1px 6px;
+}
+.run-summary-tok {
+  font-family: 'JetBrains Mono', monospace; font-size: 9px;
+  color: var(--text-muted); flex-shrink: 0;
+}
 .event-detail {
   background: var(--surface3); border-radius: var(--radius-xs);
   padding: 6px 8px; font-size: 9.5px;

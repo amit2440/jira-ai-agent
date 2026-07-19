@@ -19,6 +19,12 @@ DB_PATH = DATA_DIR / "assistant.db"
 
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
 
+# LangSmith observability — set these env vars to enable tracing
+# LANGCHAIN_TRACING_V2=true
+# LANGCHAIN_API_KEY=ls__...
+# LANGCHAIN_PROJECT=jira-agent
+LANGSMITH_ENABLED = os.getenv("LANGCHAIN_TRACING_V2", "false").lower() == "true"
+
 TEMPERATURE = {
     "planning": 0.7,
     "extraction": 0.1,

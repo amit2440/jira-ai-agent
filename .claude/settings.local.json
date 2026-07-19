@@ -24,7 +24,14 @@
       "Bash(.venv/bin/python -m py_compile app/tools/jira.py app/workflow.py)",
       "Bash(awk '/0f9787a6-10b5-4cfe-9a84-b64e4917cbd9/{print NR\": \"$0}' /Users/amitraut/langgraph-workspace/AI-Agent-JIRA/backend/logs/agent.log)",
       "Bash(rtk git *)",
-      "Bash(git check-ignore *)"
+      "Bash(git check-ignore *)",
+      "Bash(.venv/bin/pip install *)",
+      "Bash(.venv/bin/python -c \"from app.workflow import chat; from app.agents.report import write_report, review_report; print\\('OK'\\)\")",
+      "Bash(python -c \"from app.graph.builder import build_graph; g = build_graph\\(\\); print\\('OK'\\)\")",
+      "Bash(python3 -c \"from app.graph.builder import build_graph; g = build_graph\\(\\); print\\('OK'\\)\")",
+      "Bash(.venv/bin/python3 -c \"from app.graph.builder import build_graph; g = build_graph\\(\\); print\\('OK'\\)\")",
+      "Bash(rtk curl *)",
+      "Bash(rtk gain *)"
     ]
   }
 }

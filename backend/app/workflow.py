@@ -19,6 +19,31 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+try:
+    from langsmith import traceable
+    from langsmith.run_helpers import get_current_run_tree as _get_ls_run
+except ImportError:
+    def traceable(**_):  # type: ignore[misc]
+        def _wrap(fn):
+            return fn
+        return _wrap
+    _get_ls_run = lambda: None  # type: ignore[assignment]
+
+
+def _stamp_ls_metadata(run: "RunState") -> None:
+    """Inject run identity into the active LangSmith trace so threads are linkable."""
+    try:
+        rt = _get_ls_run()
+        if rt is not None:
+            rt.metadata.update({
+                "thread_id": run.thread_id,
+                "run_id":    run.run_id,
+                "project_key": run.project_key,
+                "flow":      run.flow,
+            })
+    except Exception:
+        pass
+
 from .agents.qa import answer_from_jira, answer_from_rag, answer_hybrid, nl_to_jql
 from .agents.report import plan_report, review_report, write_report
 from .agents.router import route_request
@@ -57,6 +82,12 @@ def _add_tokens(run: RunState, meta: dict[str, Any]) -> None:
     run.total_tokens += int(usage.get("total_tokens", 0))
     if meta.get("model"):
         run.model = meta["model"]
+    if usage and run.events:
+        run.events[-1].detail["token_usage"] = {
+            "prompt_tokens":     usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "total_tokens":      usage.get("total_tokens", 0),
+        }
 
 
 def _make_source_refs(docs: list[dict[str, Any]], source: str = "knowledge") -> list[SourceRef]:
@@ -198,14 +229,23 @@ def chat(req: ChatRequest) -> ChatResponse:
 # Q&A FLOWS (immediate, no approval)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@traceable(name="rag_qa_flow", run_type="chain")
 def _rag_qa_flow(run: RunState) -> ChatResponse:
     """Answer from BRD knowledge documents via hybrid search."""
+    _stamp_ls_metadata(run)
     log_state(run, "RAG_QA_START")
-    with track_node(run, "hybrid_search", "BRD documents retrieved", "tool"):
+    with track_node(run, "brd_retrieval", "BRD documents retrieved (BM25 + vector)", "tool"):
         docs = hybrid_search_tool(run.text, limit=5, project_key=run.project_key)
         run.retrieved_documents = docs
-        run.events[-1].detail["documents"] = [{"title": d["title"], "score": d.get("score")} for d in docs]
-    log_retrieval(run, len(docs), "hybrid_rag", titles=[d["title"] for d in docs])
+        bm25_count   = sum(1 for d in docs if d.get("bm25_score") is not None)
+        vector_count = sum(1 for d in docs if d.get("vector_score") is not None)
+        run.events[-1].detail.update({
+            "documents":    [{"title": d["title"], "score": d.get("score")} for d in docs],
+            "total":        len(docs),
+            "bm25_count":   bm25_count,
+            "vector_count": vector_count,
+        })
+    log_retrieval(run, len(docs), "brd_retrieval", titles=[d["title"] for d in docs])
 
     with track_node(run, "rag_qa_agent", "RAG answer generated", "function"):
         payload, meta = answer_from_rag(run.text, docs, _run=run, project_key=run.project_key)
@@ -229,14 +269,17 @@ def _rag_qa_flow(run: RunState) -> ChatResponse:
     )
 
 
+@traceable(name="jira_qa_flow", run_type="chain")
 def _jira_qa_flow(run: RunState) -> ChatResponse:
     """Answer from live Jira data using NL→JQL."""
+    _stamp_ls_metadata(run)
     log_state(run, "JIRA_QA_START")
 
     # Step 1: Convert question to JQL
     with track_node(run, "nl_to_jql", "JQL generated from question", "function"):
-        jql, jql_explanation = nl_to_jql(run.text, run.project_key or "EOMS", _run=run)
+        jql, jql_explanation, nl_meta = nl_to_jql(run.text, run.project_key or "EOMS", _run=run)
         run.events[-1].detail.update({"jql": jql, "explanation": jql_explanation})
+        _add_tokens(run, nl_meta)
     log_decision(run, "nl_to_jql", jql, jql_explanation)
 
     # Step 2: Execute JQL and get results
@@ -282,15 +325,24 @@ def _jira_qa_flow(run: RunState) -> ChatResponse:
     )
 
 
+@traceable(name="hybrid_qa_flow", run_type="chain")
 def _hybrid_qa_flow(run: RunState) -> ChatResponse:
     """Cross-reference BRD docs and Jira for implementation gap analysis."""
+    _stamp_ls_metadata(run)
     log_state(run, "HYBRID_QA_START")
 
     # Step 1: BRD retrieval
-    with track_node(run, "hybrid_search", "BRD documents retrieved", "tool"):
+    with track_node(run, "brd_retrieval", "BRD documents retrieved (BM25 + vector)", "tool"):
         brd_docs = hybrid_search_tool(run.text, limit=5, project_key=run.project_key)
-        run.events[-1].detail["brd_count"] = len(brd_docs)
-    log_retrieval(run, len(brd_docs), "hybrid_rag", titles=[d["title"] for d in brd_docs])
+        bm25_count   = sum(1 for d in brd_docs if d.get("bm25_score") is not None)
+        vector_count = sum(1 for d in brd_docs if d.get("vector_score") is not None)
+        run.events[-1].detail.update({
+            "brd_count":    len(brd_docs),
+            "total":        len(brd_docs),
+            "bm25_count":   bm25_count,
+            "vector_count": vector_count,
+        })
+    log_retrieval(run, len(brd_docs), "brd_retrieval", titles=[d["title"] for d in brd_docs])
 
     # Step 2: Jira retrieval (health metrics for broad context)
     with track_node(run, "jira_health", "Jira health metrics retrieved", "tool"):
@@ -363,8 +415,10 @@ def _report_flow_as_chat(run: RunState) -> ChatResponse:
 # SHARED PIPELINE IMPLEMENTATIONS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@traceable(name="ticket_pipeline", run_type="chain")
 def _run_ticket_pipeline(run: RunState) -> None:
     """Ticket generation pipeline — populates run in-place."""
+    _stamp_ls_metadata(run)
     effective_project = (run.project_key or JIRA_PROJECT_KEY or "").upper()
     log_state(run, "TICKET_ENHANCE")
     with track_node(run, "retrieval", "BRD documents retrieved", "tool"):
@@ -393,9 +447,14 @@ def _run_ticket_pipeline(run: RunState) -> None:
     save_run(run)
 
 
+_QUALITY_THRESHOLD = 0.85
+_MAX_REVISIONS = 2
+
+
+@traceable(name="report_pipeline", run_type="chain")
 def _run_report_pipeline(run: RunState) -> None:
-    """Report generation pipeline — populates run in-place."""
-    effective_project = (run.project_key or JIRA_PROJECT_KEY or "").upper()
+    """Report generation pipeline with reflection loop — populates run in-place."""
+    _stamp_ls_metadata(run)
 
     with track_node(run, "retrieval", "Jira health metrics retrieved", "tool"):
         run.retrieved_documents = jira_project_health(run.project_key)
@@ -406,19 +465,82 @@ def _run_report_pipeline(run: RunState) -> None:
         plan, meta = plan_report(run.text, run.retrieved_documents, _run=run)
         _add_tokens(run, meta)
 
-    log_state(run, "REPORT_WRITE")
-    with track_node(run, "writer", "Report draft written", "function"):
-        report, meta = write_report(run.text, plan, run.retrieved_documents, _run=run)
-        _add_tokens(run, meta)
+    # ── REFLECTION LOOP: writer → reviewer → loop if quality < threshold ──────
+    revision = 0
+    reviewer_feedback = ""
+    report: dict = {}
 
-    log_state(run, "REPORT_REVIEW")
-    with track_node(run, "reviewer", "Review completed", "function"):
-        report, meta = review_report(report, _run=run)
-        run.result = {"report": report}
-        _add_tokens(run, meta)
+    while True:
+        log_state(run, "REPORT_WRITE", revision=revision)
+        with track_node(run, "writer", f"Report draft written (revision {revision})", "function"):
+            report, meta = write_report(
+                run.text, plan, run.retrieved_documents,
+                _run=run, feedback=reviewer_feedback,
+            )
+            _add_tokens(run, meta)
 
+        log_state(run, "REPORT_REVIEW", revision=revision)
+        with track_node(run, "reviewer", f"Review completed (revision {revision})", "function"):
+            report, meta = review_report(report, _run=run)
+            _add_tokens(run, meta)
+
+        quality_score = report.get("quality_score", _QUALITY_THRESHOLD)
+        reviewer_feedback = "\n".join(report.get("review_notes", []))
+
+        looping = quality_score < _QUALITY_THRESHOLD and revision < _MAX_REVISIONS
+        log_decision(
+            run, "reflection_check",
+            f"revision={revision} quality={quality_score:.2f} threshold={_QUALITY_THRESHOLD}",
+            "writer" if looping else "confidence_check",
+        )
+        append_event(
+            run, "reflection_check",
+            f"Quality {quality_score:.2f} — {'loop back to writer' if looping else 'exit to confidence check'}",
+            "node",
+            quality_score=quality_score,
+            revision=revision,
+            decision="writer" if looping else "confidence_check",
+        )
+
+        if not looping:
+            break
+
+        revision += 1
+        append_event(
+            run, "revision",
+            f"Revision {revision} triggered — quality {quality_score:.2f} below {_QUALITY_THRESHOLD}",
+            "node",
+        )
+
+    # ── CONFIDENCE CHECK: final quality gate after reflection loop exits ──────
+    quality_score = report.get("quality_score", _QUALITY_THRESHOLD)
+    quality_warning = quality_score < _QUALITY_THRESHOLD
+    outcome = "interrupt — human review required" if quality_warning else "auto-continue"
+
+    log_decision(
+        run, "confidence_check",
+        f"quality={quality_score:.2f} revisions_used={revision} threshold={_QUALITY_THRESHOLD}",
+        outcome,
+    )
+    append_event(
+        run, "confidence_check",
+        f"Quality {quality_score:.2f} after {revision} revision(s) — {outcome}",
+        "node",
+        quality_score=quality_score,
+        quality_warning=quality_warning,
+        revisions_used=revision,
+        threshold=_QUALITY_THRESHOLD,
+    )
+
+    run.result = {
+        "report": report,
+        "quality_score": quality_score,
+        "quality_warning": quality_warning,
+        "review_notes": report.get("review_notes", []),
+    }
     run.status = "awaiting_approval"
-    log_state(run, "AWAITING_APPROVAL", total_tokens=run.total_tokens)
+    log_state(run, "AWAITING_APPROVAL", total_tokens=run.total_tokens, revisions=revision,
+              quality_score=quality_score, quality_warning=quality_warning)
     append_event(run, "human_approval", "Report draft awaiting human approval", "approval")
     save_run(run)
 

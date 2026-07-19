@@ -33,6 +33,12 @@ class GraphState(TypedDict, total=False):
     approved: bool
     feedback: str | None
 
+    # ── Reflection loop + confidence check (report flow) ────────────────────────
+    revision_count: int          # writer→reviewer iterations completed
+    quality_score: float         # reviewer score 0.0–1.0 from last review
+    reviewer_feedback: str       # concatenated reviewer notes passed back to writer
+    quality_warning: bool        # True when quality < 0.85 after all revisions — triggers interrupt
+
     # ── Observability ───────────────────────────────────────────────────────────
     model: str | None
     total_tokens: int

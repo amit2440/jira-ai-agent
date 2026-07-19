@@ -6,24 +6,27 @@ Five agent flows
   jira_qa    — Live Jira data Q&A via NL→JQL  (immediate, no approval)
   hybrid_qa  — BRD + Jira gap analysis        (immediate, no approval)
   ticket     — Draft → human approval → Jira  (human-in-the-loop)
-  report     — Plan → write → review → approval → export  (human-in-the-loop)
+  report     — Plan → write → review → reflection loop → confidence check → approval → export
 
 Topology vs. execution engine
 ──────────────────────────────
 This graph defines the authoritative node topology and is compiled so that
 GET /api/graph can render an accurate Mermaid diagram.  The active execution
 engine is workflow.py, which calls agent/tool functions directly and mirrors
-every node and edge defined here.  To promote this graph to the primary
-runtime, replace the stub node functions below with real calls into the
-agents/ and tools/ modules and add a MemorySaver checkpointer.
+every node and edge defined here.
 
 Decision points
 ───────────────
-  pii_validation  → "router" (safe) | END (PII detected)
-  router          → one of five flow entry nodes based on state["flow"]
-  human_approval  → "jira_tool" (ticket approved) |
-                    "report_export" (report approved) |
-                    "logging" (rejected — skips action, goes to finalize)
+  pii_validation    → "project_validation" (safe) | END (PII detected)
+  project_validation → "router" (known project) | END (unknown project)
+  router            → one of five flow entry nodes based on state["flow"]
+  reflection_check  → "writer" (quality < 0.85 AND revisions < 2) |
+                      "confidence_check" (quality >= 0.85 OR max revisions reached)
+  confidence_check  → "human_approval" (quality < 0.85 — interrupt with warning) |
+                      "human_approval" (quality >= 0.85 — auto-continue, no warning)
+  human_approval    → "jira_tool" (ticket approved) |
+                      "report_export" (report approved) |
+                      "logging" (rejected)
 """
 from typing import Literal
 
@@ -51,8 +54,8 @@ def _router(state: GraphState) -> dict:
 
 # ── Q&A flow nodes ──────────────────────────────────────────────────────────────
 
-def _rag_retrieval(state: GraphState) -> dict:
-    """Retrieve top-k documents from the SQLite knowledge base using hybrid (BM25 + vector) search."""
+def _brd_retrieval(state: GraphState) -> dict:
+    """Retrieve top-k BRD documents using hybrid search (BM25 + vector). Used by rag_qa flow."""
     return {}
 
 
@@ -121,8 +124,18 @@ def _writer(state: GraphState) -> dict:
 
 
 def _reviewer(state: GraphState) -> dict:
-    """Quality-review the draft; return revised Markdown and review notes."""
-    return {"status": "awaiting_approval"}
+    """Quality-review the draft; return revised Markdown, notes, and quality_score (0–1)."""
+    return {"quality_score": 0.9, "revision_count": state.get("revision_count", 0)}
+
+
+def _reflection_check(state: GraphState) -> dict:
+    """Decide whether to loop back to writer or proceed to confidence check."""
+    return {}  # routing handled by _after_reflection conditional edge
+
+
+def _confidence_check(state: GraphState) -> dict:
+    """Final quality gate: interrupt for human review (< 0.85) or auto-continue (>= 0.85)."""
+    return {}  # both branches route to human_approval; quality_warning in state signals the difference
 
 
 # ── Shared action / post-processing nodes ────────────────────────────────────────
@@ -166,7 +179,7 @@ def _after_project_validation(
 def _after_router(
     state: GraphState,
 ) -> Literal[
-    "rag_retrieval",
+    "brd_retrieval",
     "nl_to_jql",
     "hybrid_retrieval",
     "requirement_enhancement",
@@ -174,12 +187,33 @@ def _after_router(
 ]:
     """Dispatch to the entry node for the classified flow."""
     return {
-        "rag_qa":    "rag_retrieval",
+        "rag_qa":    "brd_retrieval",
         "jira_qa":   "nl_to_jql",
         "hybrid_qa": "hybrid_retrieval",
         "ticket":    "requirement_enhancement",
         "report":    "jira_health",
     }.get(state.get("flow") or "rag_qa", "rag_retrieval")
+
+
+def _after_reflection(
+    state: GraphState,
+) -> Literal["writer", "confidence_check"]:
+    """Loop back to writer if quality below threshold and revisions remaining; else confidence check."""
+    quality = state.get("quality_score", 1.0)
+    revision = state.get("revision_count", 0)
+    if quality < 0.85 and revision < 2:
+        return "writer"
+    return "confidence_check"
+
+
+def _after_confidence(
+    state: GraphState,
+) -> Literal["human_approval_interrupt", "human_approval_continue"]:
+    """Route to human approval with or without quality warning."""
+    quality = state.get("quality_score", 1.0)
+    if quality < 0.85:
+        return "human_approval_interrupt"   # low quality — show warning on approval card
+    return "human_approval_continue"        # high quality — normal approval
 
 
 def _after_approval(
@@ -202,7 +236,7 @@ def build_graph():
     graph.add_node("router",                  _router)
 
     # Q&A flows
-    graph.add_node("rag_retrieval",           _rag_retrieval)
+    graph.add_node("brd_retrieval",           _brd_retrieval)
     graph.add_node("rag_qa_agent",            _rag_qa_agent)
     graph.add_node("nl_to_jql",               _nl_to_jql)
     graph.add_node("jira_search",             _jira_search)
@@ -220,6 +254,8 @@ def build_graph():
     graph.add_node("planner",                 _planner)
     graph.add_node("writer",                  _writer)
     graph.add_node("reviewer",                _reviewer)
+    graph.add_node("reflection_check",        _reflection_check)
+    graph.add_node("confidence_check",        _confidence_check)
 
     # Shared
     graph.add_node("human_approval",          _human_approval)
@@ -244,7 +280,7 @@ def build_graph():
     graph.add_conditional_edges("router", _after_router)
 
     # ── RAG Q&A ──
-    graph.add_edge("rag_retrieval",    "rag_qa_agent")
+    graph.add_edge("brd_retrieval",    "rag_qa_agent")
     graph.add_edge("rag_qa_agent",     "logging")
 
     # ── Jira Q&A ──
@@ -261,11 +297,19 @@ def build_graph():
     graph.add_edge("ticket_retrieval",        "ticket_generation")
     graph.add_edge("ticket_generation",       "human_approval")
 
-    # ── Report flow ──
-    graph.add_edge("jira_health", "planner")
-    graph.add_edge("planner",     "writer")
-    graph.add_edge("writer",      "reviewer")
-    graph.add_edge("reviewer",    "human_approval")
+    # ── Report flow (reflection loop + confidence check) ──
+    graph.add_edge("jira_health",      "planner")
+    graph.add_edge("planner",          "writer")
+    graph.add_edge("writer",           "reviewer")
+    graph.add_edge("reviewer",         "reflection_check")
+    graph.add_conditional_edges("reflection_check", _after_reflection, {
+        "writer":           "writer",
+        "confidence_check": "confidence_check",
+    })
+    graph.add_conditional_edges("confidence_check", _after_confidence, {
+        "human_approval_interrupt": "human_approval",   # quality < 0.85 — warning shown
+        "human_approval_continue":  "human_approval",   # quality >= 0.85 — auto-continue
+    })
 
     # ── Approval gate (shared by ticket + report) ──
     graph.add_conditional_edges("human_approval", _after_approval)

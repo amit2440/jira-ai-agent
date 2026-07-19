@@ -33,13 +33,19 @@ def _extract_json(text: str) -> dict[str, Any]:
     # Remove markdown code block wrappers if present (e.g. ```json ... ``` or ``` ... ```)
     cleaned = re.sub(r"^```(?:json)?\n", "", text.strip(), flags=re.I)
     cleaned = re.sub(r"\n```$", "", cleaned.strip())
-    
+
     match = re.search(r"\{.*\}", cleaned, re.S)
     if not match:
         raise ValueError("Model response did not contain JSON")
-    
-    # Use strict=False to allow control characters (like raw newlines in multi-line strings)
-    return json.loads(match.group(), strict=False)
+
+    raw = match.group()
+    try:
+        # strict=False allows literal control chars in strings
+        return json.loads(raw, strict=False)
+    except json.JSONDecodeError:
+        # Sanitize invalid JSON escape sequences (e.g. \[ \s \p) that LLMs sometimes emit
+        sanitized = re.sub(r'\\([^"\\/bfnrtu])', r'\1', raw)
+        return json.loads(sanitized, strict=False)
 
 
 def invoke_llm(
@@ -62,9 +68,7 @@ def invoke_llm(
     
     # Defaults
     temperature = TEMPERATURE.get(task, 0.0)
-    top_p = None
-    top_k = None
-    
+
     # Override from UI parameters if provided
     if _run and getattr(_run, "llm_params", None):
         params = _run.llm_params
@@ -72,8 +76,6 @@ def invoke_llm(
             temperature = params.temperature
         if params.max_tokens is not None:
             max_tokens = params.max_tokens
-        if params.top_p is not None:
-            top_p = params.top_p
 
     # ── DEMO MODE: no Groq key ─────────────────────────────────────────────────
     if not groq_enabled():
@@ -116,17 +118,15 @@ def invoke_llm(
         )
 
     # ── LLM INVOCATION ────────────────────────────────────────────────────────
-    kwargs = {}
-    if top_p is not None:
-        kwargs["top_p"] = top_p
-    # Note: Groq API does not support top_k, so we omit it to prevent TypeError
-
+    _log.debug(
+        f"{tid} [LLM_CALL:{_agent_tag}] ChatGroq params — "
+        f"temperature={temperature} max_tokens={max_tokens} model={GROQ_MODEL}"
+    )
     llm = ChatGroq(
         api_key=GROQ_API_KEY,
         model=GROQ_MODEL,
         temperature=temperature,
         max_tokens=max_tokens,
-        model_kwargs=kwargs
     )
     messages = []
     if system:
@@ -209,6 +209,6 @@ def invoke_json(
     except (ValueError, json.JSONDecodeError) as exc:
         _log.warning(
             f"{tid} [LLM_DONE:{_agent_tag}] JSON parse failed: {exc} — "
-            f"response was: {result['content'][:300]!r}"
+            f"response was: {result['content'][:300]!r} — returning empty dict with tokens"
         )
-        raise
+        return {}, result

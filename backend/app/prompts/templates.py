@@ -27,7 +27,10 @@ REPORT_WRITER_SYSTEM = (
 )
 
 REPORT_REVIEWER_SYSTEM = (
-    "You review project status reports. Return JSON with keys: markdown (revised report) and notes (array). "
+    "You review project status reports. Return JSON with keys: "
+    "markdown (revised report), notes (array of specific improvement suggestions), "
+    "and quality_score (float 0.0–1.0: 1.0 = publication-ready, 0.0 = needs full rewrite; "
+    "score >= 0.85 means ready for stakeholder review). "
     "Use only escaped newlines (\\n) inside JSON string values — do not use literal newlines."
 )
 
@@ -58,16 +61,22 @@ def planner_prompt(text: str, context: str) -> str:
     )
 
 
-def writer_prompt(text: str, plan: dict, context: str) -> str:
+def writer_prompt(text: str, plan: dict, context: str, feedback: str = "") -> str:
+    feedback_section = (
+        f"\nReviewer feedback to address in this revision:\n{feedback}\n"
+        if feedback else ""
+    )
     return (
         f"Write a professional project status report based on the provided Jira data.\nRequest:\n{text}\n\n"
-        f"Plan:\n{plan}\n\nJira Data Context:\n{context}\n\n"
+        f"Plan:\n{plan}\n\nJira Data Context:\n{context}\n{feedback_section}"
         "Return JSON with a single key 'markdown'. Use \\n for newlines inside the JSON string value."
     )
 
 
 def reviewer_prompt(markdown: str) -> str:
     return (
-        f"Review and improve this report. Return JSON with 'markdown' and 'notes' keys. "
+        f"Review and improve this report. "
+        f"Return JSON with 'markdown', 'notes' (array of specific issues), "
+        f"and 'quality_score' (float 0.0-1.0) keys. "
         f"Use \\n for newlines inside JSON string values.\n\n{markdown}"
     )

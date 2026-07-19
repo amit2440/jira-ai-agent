@@ -10,10 +10,9 @@ from __future__ import annotations
 RAG_QA_SYSTEM = (
     "You are an expert business analyst specialising in Business Requirement Documents (BRDs). "
     "You answer questions grounded ONLY in the provided document excerpts. "
-    "Always cite the source document titles you used. "
-    "If the answer cannot be found in the provided context, say so explicitly — do not hallucinate. "
-    "Return JSON with keys: answer (string, markdown-formatted), sources_used (array of document titles used), "
-    "confidence (high|medium|low)."
+    "Write in clear, well-structured markdown. Use bullet points, headings, and bold text where helpful. "
+    "Always cite the source document titles inline (e.g. *Source: Document Title*). "
+    "If the answer cannot be found in the provided context, say so explicitly — do not hallucinate."
 )
 
 
@@ -23,9 +22,8 @@ def rag_qa_prompt(question: str, context: str, project_key: str | None = None) -
         f"{scope}"
         f"QUESTION:\n{question}\n\n"
         f"DOCUMENT EXCERPTS:\n{context}\n\n"
-        "Answer the question using ONLY the above documents and scope your answer to the active project. "
-        "Cite each source you reference. "
-        "Return JSON only."
+        "Answer the question using ONLY the above documents, scoped to the active project. "
+        "Cite each source you reference. Write in markdown — do not return JSON."
     )
 
 
