@@ -290,10 +290,11 @@ def answer_hybrid(
         gaps_list = ", ".join(gaps) if gaps else "none"
         fixed_summary = f"{json_covered} of {json_total} requirements are covered ({pct}%). Missing: {gaps_list}."
         payload["answer"] = _re.sub(
-            r"\d+ of \d+ requirements? are covered \(\d+%\)[^.\n]*\.?",
+            r"\d+ of \d+ requirements? are covered \(\d+%\).*?(?=\n|$)",
             fixed_summary,
             answer_text,
             count=1,
+            flags=_re.DOTALL if "\n" not in answer_text[:200] else 0,
         )
         meta["token_budget"] = budget
         _log.info(
