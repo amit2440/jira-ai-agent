@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.getenv("DATA_DIR", BACKEND_DIR))
 CHROMA_DB_DIR = DATA_DIR / "chroma_db"
-DB_PATH = DATA_DIR / "knowledge.db"
+DB_PATH = DATA_DIR / "assistant.db"   # same as app config DB_PATH
 DEFAULT_PDF = BACKEND_DIR / "docs" / "EOMS_BRD.pdf"
 
 
