@@ -19,7 +19,14 @@ _PII_SCORE_THRESHOLD = 0.85
 _PII_IGNORE_TYPES = {"ORGANIZATION", "LOCATION", "DATE_TIME", "NRP"}
 
 # Product/tool names spaCy misclassifies as PERSON
-_KNOWN_NON_PERSONS = {"jira", "confluence", "github", "gitlab", "slack", "eoms", "brd"}
+_KNOWN_NON_PERSONS = {
+    "jira", "confluence", "github", "gitlab", "slack", "eoms", "brd",
+    # Product/system names misclassified as PERSON by spaCy
+    "active directory", "active", "directory", "azure", "ldap", "okta", "workday",
+    "servicenow", "sap", "oracle", "salesforce", "sharepoint", "teams",
+    # Jira/agile terms misclassified as PERSON
+    "sprint", "backlog", "epic", "scrum", "kanban", "agile",
+}
 
 
 def pii_validator(text: str) -> dict[str, Any]:

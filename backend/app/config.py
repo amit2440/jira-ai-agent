@@ -17,7 +17,7 @@ JIRA_PROJECT_KEY = os.getenv("JIRA_PROJECT_KEY", "DEMO")
 DATA_DIR = Path(os.getenv("DATA_DIR", Path(__file__).parent.parent))
 DB_PATH = DATA_DIR / "assistant.db"
 
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,https://jira-ai-agent.vercel.app").split(",")
 
 # LangSmith observability — set these env vars to enable tracing
 # LANGCHAIN_TRACING_V2=true

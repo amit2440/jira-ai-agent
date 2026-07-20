@@ -34,13 +34,13 @@ def hybrid_search(query: str, limit: int = 5, project_key: str | None = None) ->
     merged: dict[str, dict[str, Any]] = {}
 
     for rank, doc in enumerate(bm25_docs):
-        doc_id = doc.get("id") or doc.get("title")
+        doc_id = doc.get("title") or doc.get("id")
         rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
         if doc_id not in merged:
             merged[doc_id] = {**doc, "bm25_rank": rank}
 
     for rank, doc in enumerate(vector_docs):
-        doc_id = doc.get("id") or doc.get("title")
+        doc_id = doc.get("title") or doc.get("id")
         rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
         if doc_id not in merged:
             merged[doc_id] = {**doc, "vector_rank": rank}
@@ -48,7 +48,7 @@ def hybrid_search(query: str, limit: int = 5, project_key: str | None = None) ->
             merged[doc_id]["vector_rank"] = rank
 
     rrf_ranked = sorted(
-        [{**doc, "score": round(rrf_scores[doc.get("id") or doc.get("title")], 4)} for doc in merged.values()],
+        [{**doc, "score": round(rrf_scores[doc.get("title") or doc.get("id")], 4)} for doc in merged.values()],
         key=lambda x: x["score"],
         reverse=True,
     )

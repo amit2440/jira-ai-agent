@@ -48,11 +48,19 @@ _BRD_TOOLS = {"hybrid_search_tool_react", "bm25_search_tool_react", "vector_sear
 _JIRA_TOOLS = {"jira_search_react", "jira_project_health_react"}
 
 _RETRIEVAL_SYSTEM = (
-    "You are a retrieval planner. Given a question and available tools, "
-    "select the most appropriate tool(s) to fetch relevant context. "
-    "For BRD/requirements questions use hybrid_search_tool_react. "
-    "For Jira/project status questions use jira_search_react or jira_project_health_react. "
-    "For gap analysis use both BRD and Jira tools. "
+    "You are a retrieval planner. Select the right tool(s) to fetch context for the question.\n\n"
+    "TOOL SELECTION RULES:\n"
+    "- BRD/requirements questions → hybrid_search_tool_react\n"
+    "- Gap analysis (BRD vs Jira) → hybrid_search_tool_react + jira_project_health_react\n"
+    "- Project health / status overview → jira_project_health_react\n"
+    "- Listing specific bugs/tickets by type, status, or keyword → jira_search_react with targeted JQL\n"
+    "  Examples: issuetype = Bug AND statusCategory != Done\n"
+    "            issuetype = Bug AND sprint in openSprints() AND statusCategory != Done\n"
+    "            issuetype = Bug AND sprint not in openSprints() AND sprint is EMPTY\n\n"
+    "SCOPE RULES for jira_project_health_react (pass as 'scope' argument):\n"
+    "- Question mentions 'sprint' or 'current sprint' → scope='sprint'\n"
+    "- Question mentions 'backlog' → scope='backlog'\n"
+    "- Question about entire project / no scope mentioned → scope='all'\n\n"
     "Call the tools now — do not answer the question yourself."
 )
 
