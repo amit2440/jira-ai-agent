@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import ALLOWED_ORIGINS, DATA_DIR, operating_mode
 from .database import add_document, documents, get_run, init_db
+from .git_poller import start_poller
 from .graph.builder import build_graph
 from .logging.logger import agent_logger
 from .models import ApprovalRequest, ChatRequest, KnowledgeDocument, RunRequest
@@ -53,6 +54,7 @@ def startup() -> None:
         "5-flow routing: rag_qa | jira_qa | hybrid_qa | ticket | report"
     )
     threading.Thread(target=_auto_ingest, daemon=True).start()
+    start_poller()  # only starts if GIT_AUTO_PULL=true
 
 
 @app.get("/health")

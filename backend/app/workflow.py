@@ -422,7 +422,23 @@ def _ticket_flow_as_chat(run: RunState) -> ChatResponse:
 
 def _report_flow_as_chat(run: RunState) -> ChatResponse:
     """Run report generation and return draft awaiting approval."""
-    _run_report_pipeline(run)
+    from .agents.report import ReportLLMUnavailable
+    try:
+        _run_report_pipeline(run)
+    except ReportLLMUnavailable as exc:
+        run.status = "failed"
+        run.error = (
+            f"LLM unavailable — report generation requires a working LLM connection. "
+            f"Details: {exc}"
+        )
+        log_error(run, "report_pipeline", run.error)
+        save_run(run)
+        log_run_end(run)
+        return ChatResponse(
+            run_id=run.run_id, thread_id=run.thread_id,
+            flow=run.flow, status="failed", error=run.error,
+            events=run.events, model=run.model, total_tokens=run.total_tokens,
+        )
     return ChatResponse(
         run_id=run.run_id, thread_id=run.thread_id,
         flow=run.flow, status=run.status,

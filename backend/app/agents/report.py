@@ -34,6 +34,10 @@ def _tid(run) -> str:
     return "[THREAD:no-run]"
 
 
+class ReportLLMUnavailable(RuntimeError):
+    """Raised when the LLM required for report generation is unavailable."""
+
+
 def _fallback_report(text: str, refs: list[dict[str, Any]]) -> dict[str, Any]:
     context = "\n".join(f"- **{x['title']}**: {x.get('content', '')}" for x in refs)
     return {
@@ -160,12 +164,12 @@ def write_report(
         )
         if not payload or "markdown" not in payload:
             _log.warning(
-                f"{tid} [REPORT_WRITER] LLM returned invalid payload (missing 'markdown' key) — "
-                f"using fallback report template"
+                f"{tid} [REPORT_WRITER] LLM returned invalid payload (missing 'markdown' key)"
             )
-            payload = _fallback_report(safe_text, refs)
-        else:
-            payload.setdefault("title", plan.get("title", "Project Status Report"))
+            raise ReportLLMUnavailable(
+                "LLM returned an empty or malformed report. Check that GROQ_API_KEY is set and the model is reachable."
+            )
+        payload.setdefault("title", plan.get("title", "Project Status Report"))
 
         meta["token_budget"] = budget
         md_len = len(payload.get("markdown", ""))
@@ -180,17 +184,13 @@ def write_report(
         )
         return payload, meta
 
+    except ReportLLMUnavailable:
+        raise
     except Exception as exc:
-        _log.warning(
-            f"{tid} [REPORT_WRITER] Writing FAILED — {exc!r}. "
-            f"Using fallback report template."
+        _log.error(
+            f"{tid} [REPORT_WRITER] Writing FAILED — {exc!r}. LLM unavailable."
         )
-        return _fallback_report(safe_text, refs), {
-            "model": "template",
-            "temperature": 0.8,
-            "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-            "token_budget": budget,
-        }
+        raise ReportLLMUnavailable(f"LLM unavailable: {exc}") from exc
 
 
 def review_report(
