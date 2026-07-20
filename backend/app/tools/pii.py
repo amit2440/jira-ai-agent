@@ -18,11 +18,17 @@ _PII_SCORE_THRESHOLD = 0.85
 # Entity types that are not sensitive — org/location names in project context are expected
 _PII_IGNORE_TYPES = {"ORGANIZATION", "LOCATION", "DATE_TIME", "NRP"}
 
+# Product/tool names spaCy misclassifies as PERSON
+_KNOWN_NON_PERSONS = {"jira", "confluence", "github", "gitlab", "slack", "eoms", "brd"}
+
+
 def pii_validator(text: str) -> dict[str, Any]:
     results = _analyzer.analyze(text=text, language="en")
     findings = [
         r.entity_type for r in results
-        if r.score >= _PII_SCORE_THRESHOLD and r.entity_type not in _PII_IGNORE_TYPES
+        if r.score >= _PII_SCORE_THRESHOLD
+        and r.entity_type not in _PII_IGNORE_TYPES
+        and text[r.start:r.end].lower() not in _KNOWN_NON_PERSONS
     ]
     return {"safe": not findings, "findings": findings}
 
