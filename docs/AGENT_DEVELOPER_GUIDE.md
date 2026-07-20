@@ -74,7 +74,9 @@ Think of it like a flowchart where:
 | Hard to visualize | Built-in Mermaid diagram export |
 | No checkpointing | MemorySaver persists state across HTTP requests |
 
-**In this project:** The LangGraph graph (`backend/app/graph/builder.py`) defines the authoritative topology and renders the `/api/graph` Mermaid diagram. The active execution engine is `backend/app/workflow.py`, which calls agent functions directly. This is a common pattern during development — the graph is the specification; `workflow.py` is the implementation.
+**In this project:** The LangGraph graph (`backend/app/graph/builder.py`) is the authoritative topology **and the live execution engine** — `graph.invoke()`/`.ainvoke()`/`.astream()` run every request, and `graph.get_graph().draw_mermaid()` renders the `/api/graph` diagram from that same compiled object, so it can't drift from what actually runs. `backend/app/workflow.py` is thin glue: it builds the initial `GraphState`, calls the graph, and reshapes the result into HTTP response models. It contains no node logic.
+
+Because node functions in `graph/builder.py` need attribute-style access (`run.text`, `run.events.append(...)`) to reuse the existing `agents/*.py`/`logging/logger.py` functions unmodified, `backend/app/graph/bridge.py` converts between LangGraph's plain-dict `GraphState` and a pydantic `RunState` object at the top/bottom of every node.
 
 ---
 
@@ -91,20 +93,36 @@ class GraphState(TypedDict, total=False):
     project_key: str        # Jira project key ("EOMS", "DEMO", etc.)
     status:    str          # "running" | "awaiting_approval" | "completed" | "failed"
     
-    retrieved_documents: list  # documents retrieved by the retrieval step
-    jql_query:  str            # the JQL query generated for jira_qa flow
-    enhanced_text: str         # PII-redacted + normalised requirement text
-    
-    result:    dict            # final output: {"ticket": {...}} or {"report": {...}}
+    retrieved_documents: list  # merged documents for the flow (react_retrieval output)
+    brd_docs: list             # react_retrieval split — BRD half, consumed by rag/hybrid agents
+    jira_docs: list            # react_retrieval split — Jira half, consumed by jira/hybrid agents
+    enhanced_text: str         # PII-redacted requirement text (ticket flow)
+    grounded_requirement: str  # BRD-grounded rewrite from contradiction_check (ticket flow)
+    contradictions: list       # requirement-vs-BRD contradictions found before ticket generation
+    ambiguities: list
+
+    plan: dict                 # report flow: section plan
+    report: dict                # report flow: markdown + quality_score + review_notes
+
+    result:    dict            # final output: {"ticket": {...}} or {"report": {...}} or {"answer": {...}}
     events:    list            # timeline of what happened (shown in the UI sidebar)
     error:     str             # error message if something went wrong
     
     approved:  bool            # True if the human approved the draft
     feedback:  str             # optional human feedback text
-    
+
+    revision_count: int         # writer↔reviewer iterations completed (reflection loop)
+    quality_score: float        # reviewer score 0.0–1.0
+    quality_warning: bool       # True when quality < 0.90 after all revisions
+
+    session_id: str             # stable across turns — enables conversation memory
+    conversation_history: list  # prior turns injected into Q&A prompts
+
     model:        str          # which LLM model was used
     total_tokens: int          # total tokens consumed across all LLM calls
-    prompt_version: str        # version tag for the prompt templates
+
+    pending_gaps: list[str]     # gap-cycling: remaining missing requirements to offer as tickets
+    pending_topic: str
 ```
 
 **Key concept:** `total=False` means every field is optional — nodes only need to return the fields they change.
@@ -130,23 +148,24 @@ The graph merges the returned dict into the existing state — you don't return 
 
 | Node | File | What it does |
 |---|---|---|
-| `pii_validation` | `tools/pii.py` | Regex-scans input for email/phone/SSN/card |
+| `pii_validation` | `tools/pii.py` | Presidio NLP scan (+ regex fallback) for email/phone/SSN/card/Aadhaar |
+| `project_validation` | `database.py` + `tools/jira.py` | Confirms the project key has BRD docs or a live Jira project |
 | `router` | `agents/router.py` | LLM classifies intent into one of 5 flows |
-| `rag_retrieval` | `retrievers/hybrid.py` | BM25 + vector search over knowledge base |
-| `rag_qa_agent` | `agents/qa.py` | Answers question from retrieved BRD docs |
-| `nl_to_jql` | `agents/qa.py` | Translates natural language → Jira JQL query |
-| `jira_search` | `tools/jira.py` | Executes JQL against Jira REST API |
-| `jira_qa_agent` | `agents/qa.py` | Answers question from Jira issue data |
-| `hybrid_retrieval` | `retrievers/hybrid.py` + `tools/jira.py` | Gets BRD docs AND Jira metrics |
-| `hybrid_qa_agent` | `agents/qa.py` | Cross-references both sources for gap analysis |
-| `requirement_enhancement` | `agents/ticket.py` | Normalises + PII-redacts the requirement |
-| `ticket_retrieval` | `retrievers/hybrid.py` | Gets relevant BRD context for the ticket |
+| `react_retrieval` | `graph/react_agent.py` | Shared by rag_qa/jira_qa/hybrid_qa — LLM picks which retrieval tool(s) to call |
+| `rag_qa_agent` | `agents/qa.py` | Answers question from retrieved BRD docs (+ query expansion, + conversation history) |
+| `jira_qa_agent` | `agents/qa.py` | Answers question from Jira issue data returned by react_retrieval |
+| `hybrid_qa_agent` | `agents/qa.py` | Cross-references both sources for gap analysis; recomputes coverage counts in code |
+| `requirement_enhancement` | `agents/ticket.py` | PII-redacts the requirement |
+| `ticket_retrieval` | `retrievers/hybrid.py` + `agents/qa.expand_query` | Gets relevant BRD context for the ticket, expanded + reranked |
+| `contradiction_check` | `agents/ticket.py` | Compares requirement against BRD sections; flags contradictions/ambiguities, produces `grounded_requirement` |
 | `ticket_generation` | `agents/ticket.py` | LLM drafts the Jira ticket JSON |
 | `jira_health` | `tools/jira.py` | Fetches project metrics (open bugs, blockers, etc.) |
 | `planner` | `agents/report.py` | LLM plans the report structure (sections) |
 | `writer` | `agents/report.py` | LLM writes the full Markdown report |
-| `reviewer` | `agents/report.py` | LLM reviews and refines the draft |
-| `human_approval` | `tools/state.py` | Pauses — waits for POST /api/runs/{id}/approve |
+| `reviewer` | `agents/report.py` | LLM reviews and refines the draft, returns `quality_score` |
+| `reflection_check` | `graph/builder.py` | Loops back to `writer` if `quality_score < 0.90` and revisions remain, else exits to `confidence_check` |
+| `confidence_check` | `graph/builder.py` | Sets `quality_warning` for the UI before approval |
+| `human_approval` | `graph/builder.py` | Calls LangGraph `interrupt()` — checkpointed pause, resumed by `POST /api/runs/{id}/approve` |
 | `jira_tool` | `tools/jira.py` | Creates the approved ticket in Jira via REST API |
 | `report_export` | `tools/export.py` | Writes the approved report to `exports/` directory |
 | `logging` | `logging/logger.py` | Records the final trace and closes the run |
@@ -165,19 +184,19 @@ graph.add_edge("writer",  "reviewer")     # always: writer → reviewer
 ```python
 def _after_router(state: GraphState) -> str:
     return {
-        "rag_qa":    "rag_retrieval",
-        "jira_qa":   "nl_to_jql",
-        "hybrid_qa": "hybrid_retrieval",
+        "rag_qa":    "react_retrieval",
+        "jira_qa":   "react_retrieval",
+        "hybrid_qa": "react_retrieval",
         "ticket":    "requirement_enhancement",
         "report":    "jira_health",
-    }.get(state.get("flow"), "rag_retrieval")
+    }.get(state.get("flow") or "rag_qa", "react_retrieval")
 
 graph.add_conditional_edges("router", _after_router)
 ```
 
-This is how the system "branches" — the router sets `state["flow"]`, and this function reads it to decide where to go.
+This is how the system "branches" — the router sets `state["flow"]`, and this function reads it to decide where to go. A second conditional edge (`_after_retrieval`) then routes `react_retrieval`'s output to the right `*_qa_agent` based on the same `flow` field.
 
-The full graph looks like this (accurate as of v2.0.0):
+The full graph (see `docs/LANGGRAPH.md` for the diagram kept in sync with `graph/builder.py`):
 
 ```
 START
@@ -186,15 +205,17 @@ START
 pii_validation ──[PII detected?]──► END (error)
   │
   ▼ (safe)
-router ──[flow?]──┬── "rag_qa"    ──► rag_retrieval ──► rag_qa_agent ──► logging ──► END
-                  ├── "jira_qa"   ──► nl_to_jql ──► jira_search ──► jira_qa_agent ──► logging ──► END
-                  ├── "hybrid_qa" ──► hybrid_retrieval ──► hybrid_qa_agent ──► logging ──► END
-                  ├── "ticket"    ──► requirement_enhancement ──► ticket_retrieval
-                  │                    ──► ticket_generation ──► human_approval
+project_validation ──[unknown project?]──► END (error)
+  │
+  ▼ (valid)
+router ──[flow?]──┬── "rag_qa"/"jira_qa"/"hybrid_qa" ──► react_retrieval ──► matching *_qa_agent ──► logging ──► END
+                  ├── "ticket"    ──► requirement_enhancement ──► ticket_retrieval ──► contradiction_check
+                  │                    ──► ticket_generation ──► human_approval [interrupt]
                   │                    ──[approved?]──► jira_tool ──► logging ──► END
                   │                                └── (rejected) ──► logging ──► END
-                  └── "report"    ──► jira_health ──► planner ──► writer ──► reviewer
-                                      ──► human_approval
+                  └── "report"    ──► jira_health ──► planner ──► writer ──► reviewer ──► reflection_check
+                                      ──[quality<0.90 & revisions<2]──► writer (loop)
+                                      ──[else]──► confidence_check ──► human_approval [interrupt]
                                       ──[approved?]──► report_export ──► logging ──► END
                                                    └── (rejected) ──► logging ──► END
 ```
@@ -257,8 +278,8 @@ Creates a Jira issue via the REST API (`POST /rest/api/3/issue`).
 
 #### `jira_search(jql, max_results)` — `tools/jira.py`
 Executes a JQL query against the Jira REST API.
-- Used by the `jira_qa` flow after `nl_to_jql` generates the query
-- In demo mode: returns two hardcoded sample issues
+- The `jira_qa` flow's ReAct retrieval LLM writes the JQL directly as a tool-call argument to `jira_search_react` — the standalone `nl_to_jql()` function in `agents/qa.py` still exists but is no longer called by the graph
+- When unconfigured: returns `{"mode": "unavailable", "issues": []}`
 
 #### `jira_project_health(project_key)` — `tools/jira.py`
 Returns aggregated project metrics as a list of `{"title", "content", "score"}` dicts.
@@ -313,16 +334,16 @@ Two retrievers run in parallel; their results are fused:
 BM25 (Best Match 25) is a classical information-retrieval algorithm — think "smart keyword search".
 - It tokenises the query and documents, then scores each document by word frequency
 - Works well for exact terminology, names, acronyms
-- Uses the `rank-bm25` library; corpus = SQLite `knowledge` table
+- Backed by native SQLite **FTS5** (`knowledge_fts` virtual table, porter tokenizer) — not the `rank-bm25` Python library. Corpus = SQLite `knowledge` table, mirrored into `knowledge_fts` on every insert.
 
 ```python
-bm25 = BM25Okapi(corpus)        # corpus: tokenised docs
-scores = bm25.get_scores(query) # for each doc: relevance score
+# database.fts_search() — SQLite does the scoring natively:
+"SELECT ..., bm25(knowledge_fts) AS bm25_score FROM knowledge_fts WHERE knowledge_fts MATCH ? ORDER BY bm25_score"
 ```
 
 #### Vector Search (Semantic search) — `retrievers/vector.py`
 Vector search converts text into numerical vectors ("embeddings") so semantically similar text maps to nearby points in vector space.
-- Model: `BAAI/bge-large-en-v1.5` (1024-dim, HuggingFace, runs locally, no API key needed)
+- Model: `BAAI/bge-small-en-v1.5` (384-dim, HuggingFace, runs locally, no API key needed)
 - BGE query prefix applied: `"Represent this sentence for searching relevant passages: {query}"`
 - Vector store: [ChromaDB](https://www.trychroma.com/) (file-based, in `backend/chroma_db/`)
 - The BRD PDF is pre-ingested into Chroma via `backend/scripts/ingest_brd.py`
@@ -377,12 +398,12 @@ The LLM generates 2 alternate phrasings for the user's question. All 3 variants 
 ```
 1. PII check → safe
 2. Router → "jira_qa"
-3. nl_to_jql(question, project_key):
-      LLM → {"jql": "project = EOMS AND issuetype = Bug AND status != Done ORDER BY updated DESC"}
-4. jira_search(jql, max_results=10) → list of matching issues
-5. answer_from_jira(question, issues):
+3. react_retrieval: LLM picks jira_search_react, writing the JQL itself as a tool-call arg
+      → jira_search("project = EOMS AND issuetype = Bug AND status != Done ORDER BY updated DESC")
+      → list of matching issues, normalised into jira_docs
+4. answer_from_jira(question, jira_docs):
       LLM (temperature=0.0) → {"answer": "There are 3 open bugs...", "data_points": [...]}
-6. Return answer immediately
+5. Return answer immediately
 ```
 
 ### 9.3 `hybrid_qa` — Gap Analysis
@@ -490,17 +511,24 @@ These nucleus-sampling parameters are **not exposed** in the current UI or `LlmP
 
 Action flows (ticket and report) **pause** before taking irreversible actions, waiting for a human to review the draft.
 
-### How the pause works (without LangGraph interrupt)
+### How the pause works — native LangGraph `interrupt()`
 
-Because the active execution engine is `workflow.py` (not the LangGraph graph), the pause is implemented via **database persistence**:
+The `human_approval` node (`graph/builder.py::_human_approval`) calls LangGraph's `interrupt()` directly:
 
-1. After generating the draft, `run.status` is set to `"awaiting_approval"` and saved to SQLite
-2. The HTTP response is returned immediately with the draft
-3. The server forgets about this run — it's just a row in the `runs` table
-4. When the user clicks "Approve", the frontend calls `POST /api/runs/{id}/approve`
-5. The server reloads the run from SQLite, checks status, and calls `approve()`
+```python
+def _human_approval(state: GraphState) -> dict:
+    run = to_run_state(state)
+    payload = interrupt({"flow": run.flow, "draft": run.result, "run_id": run.run_id})
+    approved = bool(payload.get("approved")) if isinstance(payload, dict) else bool(payload)
+    ...
+```
 
-This means approval survives server restarts. The tradeoff: it's not a native LangGraph `interrupt()` — adding a `MemorySaver` checkpointer would let LangGraph handle this automatically.
+1. `interrupt()` suspends graph execution at this exact point; the checkpointer (`AsyncSqliteSaver`, writing to `checkpoints.db`, keyed by `thread_id=run_id`) persists the full `GraphState` snapshot
+2. The HTTP response returns immediately with `status="awaiting_approval"` and the draft
+3. When the user clicks "Approve", the frontend calls `POST /api/runs/{id}/approve`
+4. The server resumes the graph: `graph.ainvoke(Command(resume={"approved": ..., "feedback": ...}), config)` — LangGraph reloads the checkpoint and continues execution from inside `_human_approval`, exactly where it left off
+
+Approval survives server restarts as long as `checkpoints.db` is on disk — no manual `runs` table lookups or `approve()` dispatch logic required; the checkpointer handles state restoration natively.
 
 ### Approval endpoint
 
@@ -635,8 +663,7 @@ The UI header also shows a live badge (🟢 Live / 🔵 Groq / 🟡 Demo).
 2. Add a heuristic clause in `_heuristic_flow()`
 3. Add an example to `ROUTER_SYSTEM` and `router_prompt()` in `prompts/templates.py`
 4. Add the new agent function in `agents/`
-5. Add the new node to `graph/builder.py` with its edges
-6. Wire it into `workflow.py`'s `chat()` dispatch block
+5. Add the new node(s) to `graph/builder.py`, wire its edges (including into `_after_router`), add it to `NODE_LABELS` in `workflow.py` for the streaming progress UI
 
 ### Add a new tool
 

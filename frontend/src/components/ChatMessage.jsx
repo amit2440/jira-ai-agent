@@ -152,7 +152,7 @@ export function UserBubble({ text }) {
 }
 
 /* ── Typing Indicator ──────────────────────────────────────────────────────── */
-export function TypingIndicator({ flow }) {
+export function TypingIndicator({ flow, step }) {
   const meta = FLOW_META[flow] || { icon: "⚙️", label: "Processing" };
   return (
     <div className="msg-row msg-row--assistant">
@@ -162,7 +162,8 @@ export function TypingIndicator({ flow }) {
           <span /><span /><span />
         </div>
         <span className="typing-label">
-          {flow === "rag_qa"    ? "Searching requirement documents…"   :
+          {step ? step :
+           flow === "rag_qa"    ? "Searching requirement documents…"   :
            flow === "jira_qa"   ? "Querying live Jira data…"           :
            flow === "hybrid_qa" ? "Cross-checking BRD + Jira…"         :
            flow === "ticket"    ? "Drafting Jira ticket…"              :

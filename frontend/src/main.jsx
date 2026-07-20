@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { AssistantBubble, TypingIndicator, UserBubble } from "./components/ChatMessage";
-import { approveRun, sendChat } from "./services/api";
+import { approveRun, streamChat } from "./services/api";
 import "./style.css";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000/api";
@@ -315,7 +315,14 @@ function App() {
     };
 
     try {
-      const response = await sendChat(payload);
+      const response = await streamChat(payload, (event) => {
+        setMessages(prev => {
+          const next = [...prev];
+          const last = next[next.length - 1];
+          if (last?.busy) next[next.length - 1] = { ...last, step: event.message };
+          return next;
+        });
+      });
       setMessages(prev => {
         const next = [...prev];
         next[next.length - 1] = { type: "assistant", response };
@@ -572,7 +579,7 @@ function App() {
           ) : (
             messages.map((msg, i) => {
               if (msg.type === "user") return <UserBubble key={i} text={msg.text} />;
-              if (msg.busy) return <TypingIndicator key={i} flow={msg.flow} />;
+              if (msg.busy) return <TypingIndicator key={i} flow={msg.flow} step={msg.step} />;
               return (
                 <AssistantBubble
                   key={i}

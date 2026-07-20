@@ -10,32 +10,34 @@ React client calls FastAPI to start a thread-bound workflow run. The orchestrati
 
 ```mermaid
 flowchart TD
-    C["React UI"] -->|"POST /api/chat\nor /api/runs"| API["FastAPI"]
-    API --> O["LangGraph Workflow\n(workflow.py)"]
+    C["React UI"] -->|"POST /api/chat (or legacy /api/runs)"| API["FastAPI"]
+    API --> O["Compiled LangGraph\n(graph/builder.py — the execution engine)"]
 
     O --> PII["PII Validation"]
     PII -->|safe| PV["Project Validation\n(BRD + Jira)"]
     PV -->|valid| R{"LLM Router"}
 
-    R -->|rag_qa| QA1["BRD Retrieval → RAG Q&A\n(immediate response)"]
-    R -->|jira_qa| QA2["NL→JQL → Jira Search → Q&A\n(immediate response)"]
-    R -->|hybrid_qa| QA3["BRD + Jira → Gap Analysis\n(immediate response)"]
+    R -->|"rag_qa / jira_qa / hybrid_qa"| RR["ReAct Retrieval\n(LLM picks tool: hybrid/BM25/vector/Jira search/Jira health)"]
+    RR --> QA["*_qa_agent\n(immediate response)"]
 
-    R -->|ticket| T["Enhance → Retrieve → Generate\n→ Human Approval → Jira"]
-    R -->|report| RP["Jira Metrics → Plan → Write\n→ Reflection Loop → Confidence\n→ Human Approval → Export"]
+    R -->|ticket| T["Enhance → Retrieve → Contradiction Check\n→ Generate → Human Approval (interrupt) → Jira"]
+    R -->|report| RP["Jira Metrics → Plan → Write\n→ Reflection Loop → Confidence\n→ Human Approval (interrupt) → Export"]
 
-    O -.->|"persist"| S[("SQLite\nRuns + Events + Knowledge")]
+    O -.->|"checkpoint every node"| CKPT[("SQLite\ncheckpoints.db\nAsyncSqliteSaver")]
+    O -.->|"persist run summary + knowledge + conversation history"| S[("SQLite\nassistant.db")]
 ```
 
 ## Key design decisions
 
-**Human-in-the-loop**: Ticket and report flows pause at `human_approval`. The run persists in SQLite with `status=awaiting_approval`. A subsequent `POST /api/runs/{id}/approve` resumes execution. This enables async review (user can close browser and come back).
+**Human-in-the-loop via LangGraph `interrupt()`**: Ticket and report flows pause at `human_approval` using a real graph interrupt, checkpointed to `checkpoints.db` (`AsyncSqliteSaver`, keyed by `thread_id=run_id`). A subsequent `POST /api/runs/{id}/approve` resumes with `Command(resume=...)`. This enables async review (user can close browser and come back) and survives server restarts.
 
-**Reflection loop**: The report writer–reviewer loop runs up to 2 revisions before `confidence_check` gates to approval. This improves draft quality without requiring a human reviewer on every revision.
+**Reflection loop**: The report writer–reviewer loop runs up to 2 revisions before `confidence_check` gates to approval (quality threshold 0.90). This improves draft quality without requiring a human reviewer on every revision.
 
-**Hybrid RAG**: BRD documents are scored with 60% BM25 (keyword) + 40% vector (semantic) fusion. Both component scores are preserved on the run for observability. Production path: swap vector proxy for managed embedding store + reranking.
+**Hybrid RAG + ReAct tool selection**: BRD documents are scored via BM25 (SQLite FTS5) + vector (ChromaDB, BGE-small embeddings) fused with Reciprocal Rank Fusion, then reordered by a cross-encoder reranker. A ReAct node lets the LLM choose which retrieval tool(s) to call per question rather than the graph hardcoding one path per flow. See `docs/RAG.md`.
 
-**Demo mode**: Without API keys, the system uses template responses and a mock Jira key. All UI flows work identically. This lets developers evaluate the system without credentials.
+**Demo mode**: Without a Groq key, LLM-dependent nodes raise and are caught as a "LLM unavailable" response; without Jira keys, Jira tools return `mode=unavailable`/mock data. This lets developers evaluate retrieval and routing without credentials.
+
+**Conversational memory**: Each chat turn is persisted per `session_id` in SQLite (`memory.py`, last 20 turns). The last 6 turns are formatted and injected into the Q&A prompts so follow-up questions ("what about the second one?") resolve correctly.
 
 **Observability**: Every LLM call, retrieval, tool call, and decision emits a `TimelineEvent` with node name, kind, message, and detail (including per-step token counts). The Run Summary panel in the UI renders these as a human-readable execution trace.
 

@@ -45,7 +45,11 @@
       "Bash(git commit -m ' *)",
       "Bash(git add *)",
       "Bash(xargs ls -la)",
-      "Bash(printenv ALLOWED_ORIGINS)"
+      "Bash(printenv ALLOWED_ORIGINS)",
+      "Skill(claude-api)",
+      "Skill(claude-api:*)",
+      "Bash(rtk pip *)",
+      "Bash(python3 -c \"from langgraph.types import interrupt, Command; print\\('ok'\\)\")"
     ]
   }
 }

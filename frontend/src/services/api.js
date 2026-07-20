@@ -17,6 +17,51 @@ export async function sendChat(payload) {
   return response.json();
 }
 
+/**
+ * SSE variant of sendChat. Calls onStep(event) for each `{type:"step", node, message}`
+ * as a graph node completes, then resolves with the final ChatResponse (from the
+ * `{type:"done", response}` event). Falls back to a plain POST + JSON parse if the
+ * response isn't a stream (e.g. proxies that buffer SSE).
+ */
+export async function streamChat(payload, onStep) {
+  const response = await fetch(`${API}/chat/stream`, {
+    method: "POST",
+    headers: { ...BASE_HEADERS, "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `HTTP ${response.status}`);
+  }
+  if (!response.body) {
+    return response.json();
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResponse = null;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const events = buffer.split("\n\n");
+    buffer = events.pop() ?? "";
+    for (const raw of events) {
+      const line = raw.split("\n").find(l => l.startsWith("data: "));
+      if (!line) continue;
+      const event = JSON.parse(line.slice(6));
+      if (event.type === "step") onStep?.(event);
+      else if (event.type === "done") finalResponse = event.response;
+    }
+  }
+
+  if (!finalResponse) throw new Error("Stream ended without a response");
+  return finalResponse;
+}
+
 export async function createRun(payload) {
   const response = await fetch(`${API}/runs`, {
     method: "POST",

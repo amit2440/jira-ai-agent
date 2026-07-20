@@ -129,7 +129,13 @@ def invoke_llm(
     messages.append(HumanMessage(content=prompt))
 
     t0 = time.perf_counter()
-    response = llm.invoke(messages)
+    try:
+        response = llm.invoke(messages)
+    except Exception as exc:
+        if "429" in str(exc) or "RateLimitError" in type(exc).__name__:
+            _log.error(f"{tid} [LLM_CALL:{_agent_tag}] LLM unavailable (429 Rate Limit): {exc}")
+            raise RuntimeError("LLM unavailable") from exc
+        raise
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
 
     raw_content = str(response.content)

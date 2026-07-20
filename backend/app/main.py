@@ -1,18 +1,22 @@
+import json
 import subprocess
 import sys
 import threading
 from pathlib import Path
 
+import aiosqlite
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from .config import ALLOWED_ORIGINS, DATA_DIR, operating_mode
-from .database import add_document, documents, get_run, init_db
+from .database import add_document, documents, init_db
 from .git_poller import start_poller
 from .graph.builder import build_graph
 from .logging.logger import agent_logger
 from .models import ApprovalRequest, ChatRequest, KnowledgeDocument, RunRequest
-from .workflow import approve, chat, start
+from .workflow import approve, chat, chat_stream, get_run_state, start
 
 
 def _auto_ingest() -> None:
@@ -46,9 +50,12 @@ app.add_middleware(
 
 
 @app.on_event("startup")
-def startup() -> None:
+async def startup() -> None:
     init_db()
-    app.state.graph = build_graph()
+    checkpoint_conn = await aiosqlite.connect(str(DATA_DIR / "checkpoints.db"))
+    checkpointer = AsyncSqliteSaver(checkpoint_conn)
+    await checkpointer.setup()
+    app.state.graph = build_graph(checkpointer)
     agent_logger.info(
         "[STARTUP] EOMS Requirements Intelligence Assistant v2.0 initialised — "
         "5-flow routing: rag_qa | jira_qa | hybrid_qa | ticket | report"
@@ -64,32 +71,46 @@ def health() -> dict:
 
 # ── Unified chat endpoint ──────────────────────────────────────────────────────
 @app.post("/api/chat")
-def chat_endpoint(request: ChatRequest):
+async def chat_endpoint(request: ChatRequest):
     """
     Primary endpoint for the chat interface.
     Auto-routes to rag_qa / jira_qa / hybrid_qa (immediate) or
     ticket / report (returns draft awaiting approval).
     """
-    return chat(request)
+    return await chat(request, app.state.graph)
+
+
+@app.post("/api/chat/stream")
+def chat_stream_endpoint(request: ChatRequest):
+    """
+    SSE variant of /api/chat — emits one `step` event per graph node as it
+    completes (for a live "Searching BRD… / Generating answer…" progress UI),
+    then a final `done` event carrying the same ChatResponse /api/chat returns.
+    """
+    async def event_source():
+        async for event in chat_stream(request, app.state.graph):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(event_source(), media_type="text/event-stream")
 
 
 # ── Legacy run endpoints (backward compat) ────────────────────────────────────
 @app.post("/api/runs")
-def create_run(request: RunRequest):
-    return start(request)
+async def create_run(request: RunRequest):
+    return await start(request, app.state.graph)
 
 
 @app.get("/api/runs/{run_id}")
-def read_run(run_id: str):
-    run = get_run(run_id)
+async def read_run(run_id: str):
+    run = await get_run_state(run_id, app.state.graph)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return run
 
 
 @app.post("/api/runs/{run_id}/approve")
-def approve_run(run_id: str, request: ApprovalRequest):
-    run = get_run(run_id)
+async def approve_run(run_id: str, request: ApprovalRequest):
+    run = await get_run_state(run_id, app.state.graph)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     if run.status != "awaiting_approval":
@@ -97,7 +118,7 @@ def approve_run(run_id: str, request: ApprovalRequest):
             status_code=400,
             detail=f"Run is not awaiting approval (status={run.status})"
         )
-    return approve(run, request.approved, request.feedback)
+    return await approve(run_id, request.approved, request.feedback, app.state.graph)
 
 
 # ── Knowledge management ───────────────────────────────────────────────────────

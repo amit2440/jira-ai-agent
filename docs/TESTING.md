@@ -56,10 +56,10 @@ PYTHONPATH=backend pytest backend/tests -v -k "pii"   # single module
 
 | Test | What to check |
 |---|---|
-| `rag_qa` end-to-end | Full flow with mocked LLM → `status="completed"`, `result["answer"]` non-empty, events contain `brd_retrieval` and `rag_qa_agent` nodes. |
-| `ticket` approval | Flow pauses at `status="awaiting_approval"` → approve → `status="completed"`, event contains `jira_tool` node. |
+| `rag_qa` end-to-end | Full flow with mocked LLM → `status="completed"`, `result["answer"]` non-empty, events contain `react_retrieval` and `rag_qa_agent` nodes. |
+| `ticket` approval | Flow interrupts at `status="awaiting_approval"` (checkpointed) → approve via `Command(resume=...)` → `status="completed"`, event contains `jira_tool` node. |
 | `ticket` rejection | After rejection → `status="rejected"`, no `jira_tool` event. |
-| `report` reflection loop | Writer → reviewer → `quality_score < 0.85` → writer again (max 2 iterations). |
+| `report` reflection loop | Writer → reviewer → `quality_score < 0.90` → writer again (max 2 iterations). |
 | PII gate | Input with email → `status="failed"`, `error` contains PII type. |
 | `jira_qa` JQL generation | `nl_to_jql` event with `token_usage` present. |
 

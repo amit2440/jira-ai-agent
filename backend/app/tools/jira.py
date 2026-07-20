@@ -166,11 +166,9 @@ def jira_project_health(project_key: str | None = None, scope: str = "all") -> l
                 backlog_issues = _fetch(backlog_jql)
                 scope_label    = "backlog (not in open sprint)"
             else:  # "all"
-                sprint_issues  = _fetch(sprint_jql)
-                backlog_issues = _fetch(backlog_jql)
-                if not sprint_issues and not backlog_issues:
-                    sprint_issues = _fetch(all_jql)
-                scope_label = "entire project (sprint + backlog)"
+                sprint_issues  = _fetch(all_jql)
+                backlog_issues = []
+                scope_label = "entire project"
 
             bresp = client.post(url, json={
                 "jql": f"project = {project} AND priority = Blocker AND statusCategory != Done ORDER BY updated DESC",
@@ -246,7 +244,8 @@ def jira_project_health(project_key: str | None = None, scope: str = "all") -> l
 
         docs = []
         if sprint_issues:
-            docs.extend(_build_stats(sprint_issues, "Current Sprint"))
+            label = "Entire Project" if scope == "all" else ("Current Sprint" if scope_label == "current sprint" else scope_label)
+            docs.extend(_build_stats(sprint_issues, label))
         if backlog_issues:
             docs.extend(_build_stats(backlog_issues, "Backlog"))
 

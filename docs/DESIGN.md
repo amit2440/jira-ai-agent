@@ -2,22 +2,23 @@
 
 ## Architecture at a Glance
 
-5-flow stateful agent. Every request enters a single `POST /api/chat` endpoint, gets classified by an LLM router into one of 5 flows, executes the flow via `workflow.py`, and returns a `RunState` with events, result, and token totals. Action flows (ticket, report) pause for human approval before side effects.
+5-flow stateful agent, implemented as a compiled LangGraph `StateGraph` (`graph/builder.py`) — that graph is the execution engine. Every request enters `POST /api/chat`, gets classified by an LLM router into one of 5 flows, runs through `graph.ainvoke()`/`graph.astream()`, and returns a `ChatResponse` with events, result, and token totals. `workflow.py` is thin glue around the graph, not the orchestrator. Action flows (ticket, report) pause for human approval via a real LangGraph `interrupt()`, checkpointed to SQLite.
 
 ## Retrieval
 
-Hybrid RAG with 4 stacked improvements:
+Hybrid RAG with a ReAct tool-selection layer in front of it:
 
 | Layer | What it does |
 |---|---|
-| BGE-large embeddings | `BAAI/bge-large-en-v1.5` (1024-dim) in ChromaDB for semantic search |
-| BM25 | `rank-bm25` over SQLite `knowledge` table for keyword search |
+| ReAct tool selection | `graph/react_agent.py` — LLM bound to 5 tools picks which retrieval call(s) to make per question |
+| BGE-small embeddings | `BAAI/bge-small-en-v1.5` (384-dim) in ChromaDB for semantic search |
+| BM25 | Native SQLite FTS5 (`knowledge_fts`, porter tokenizer) for keyword search |
 | RRF fusion | Reciprocal Rank Fusion merges both result lists without score normalization |
 | Cross-encoder reranker | `ms-marco-MiniLM-L-6-v2` reorders fused candidates by query-document relevance |
 
-Query expansion (LLM generates 2 alternate phrasings) runs before retrieval to cover vocabulary mismatches.
+Query expansion (LLM generates 2 alternate phrasings) runs after react_retrieval for `rag_qa`/`hybrid_qa` to cover vocabulary mismatches.
 
-Retrieval entry point: `brd_retrieval` node in `workflow.py` (not `hybrid_search`). Ticket flow also calls retrieval to ground ticket generation in BRD content.
+Retrieval entry point: `react_retrieval` node in `graph/builder.py`, backed by `graph/react_agent.run_retrieval_react()`. Ticket flow uses a separate dedicated `ticket_retrieval` node (query-expansion + hybrid search, no ReAct) to ground ticket generation in BRD content.
 
 ## 5 Flows
 
@@ -59,7 +60,7 @@ Retrieval entry point: `brd_retrieval` node in `workflow.py` (not `hybrid_search
 **Report writer:**
 - System prompt requires every claim to cite a Jira ticket key or metric
 - Reviewer checks for speculative language ("may", "could", "potential") and forces removal
-- `quality_score` (0.0–1.0) from reviewer; ≥0.85 = stakeholder-ready
+- `quality_score` (0.0–1.0) from reviewer; ≥0.90 = stakeholder-ready (`_QUALITY_THRESHOLD` in `graph/builder.py`)
 
 ## PII Controls
 
@@ -85,7 +86,11 @@ Adaptive budgets via `services/tokens.py`:
 
 ## Human-in-the-Loop (HITL)
 
-Ticket and report flows set `run.status = "awaiting_approval"` after draft generation. HTTP response returns immediately with the draft. Approval via `POST /api/runs/{id}/approve`. Server reloads run from SQLite, executes side effect (Jira create or file export). Survives server restarts since state persists in SQLite.
+Ticket and report flows call `interrupt()` at the `human_approval` node after draft generation — a real LangGraph graph suspension, checkpointed by `AsyncSqliteSaver` (`checkpoints.db`, keyed by `thread_id=run_id`). HTTP response returns immediately with the draft (`status="awaiting_approval"`). Approval via `POST /api/runs/{id}/approve` resumes the graph with `Command(resume={"approved": ..., "feedback": ...})`, which continues to `jira_tool`/`report_export`. Survives server restarts since the checkpoint is on disk.
+
+## Conversational Memory
+
+`memory.py` persists each chat turn per `session_id` in SQLite (`conversation_history` table, max 20 turns, oldest pruned). The last 6 turns are formatted (`format_history_for_prompt`) and injected into `rag_qa`/`jira_qa`/`hybrid_qa` prompts so follow-ups resolve pronouns/references to prior turns. A separate `pending_action`/gap-cycling mechanism (`workflow._build_chat_state`) lets a hybrid_qa gap-analysis answer offer "generate tickets for missing requirements" — a short affirmative reply ("yes") rewrites the next request into a `ticket` flow for the first gap and carries the rest forward as `pending_gaps`.
 
 ## Logging and Testing
 

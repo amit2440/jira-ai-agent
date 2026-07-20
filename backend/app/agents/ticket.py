@@ -26,29 +26,14 @@ from ..tools.pii import redact
 _log = logging.getLogger("agent")
 
 
+class TicketLLMUnavailable(RuntimeError):
+    """Raised when the LLM required for ticket generation is unavailable."""
+
+
 def _tid(run) -> str:
     if run is not None:
         return f"[THREAD:{run.thread_id}]"
     return "[THREAD:no-run]"
-
-
-def _fallback_ticket(text: str, refs: list[dict[str, Any]]) -> dict[str, Any]:
-    summary = text.strip().split(".")[0][:110]
-    return {
-        "summary": summary,
-        "description": (
-            f"## Business Requirement\n{text}\n\n## Reference Context\n"
-            + "\n".join(f"- {x['title']}" for x in refs)
-        ),
-        "priority": "Medium",
-        "issue_type": "Story",
-        "acceptance_criteria": [
-            "Given an eligible user, when they complete the requested action, then the outcome is persisted.",
-            "Given invalid input, when submitted, then a clear actionable error message is displayed.",
-            "Given deployment, when monitored, then no PII appears in application logs.",
-        ],
-        "labels": ["ai-generated", "requirements"],
-    }
 
 
 def generate_ticket(
@@ -86,17 +71,15 @@ def generate_ticket(
         )
 
         if not payload:
-            _log.warning(
-                f"{tid} [TICKET_GENERATOR] LLM returned empty payload — "
-                f"using fallback ticket template"
+            _log.warning(f"{tid} [TICKET_GENERATOR] LLM returned empty payload")
+            raise TicketLLMUnavailable(
+                "LLM returned an empty or malformed ticket. Check that GROQ_API_KEY is set and the model is reachable."
             )
-            payload = _fallback_ticket(safe_text, refs)
-        else:
-            payload.setdefault("priority", "Medium")
-            payload.setdefault("issue_type", "Story")
-            payload.setdefault("labels", ["ai-generated"])
-            payload.setdefault("acceptance_criteria", [])
-            payload.setdefault("confidence", "medium")
+        payload.setdefault("priority", "Medium")
+        payload.setdefault("issue_type", "Story")
+        payload.setdefault("labels", ["ai-generated"])
+        payload.setdefault("acceptance_criteria", [])
+        payload.setdefault("confidence", "medium")
 
         meta["token_budget"] = budget
 
@@ -116,16 +99,10 @@ def generate_ticket(
         return payload, meta
 
     except Exception as exc:
-        _log.warning(
-            f"{tid} [TICKET_GENERATOR] Generation FAILED — {exc!r}. "
-            f"Using fallback ticket template."
+        _log.error(
+            f"{tid} [TICKET_GENERATOR] Generation FAILED — {exc!r}. LLM unavailable."
         )
-        return _fallback_ticket(safe_text, refs), {
-            "model": "template",
-            "temperature": 0.0,
-            "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-            "token_budget": budget,
-        }
+        raise TicketLLMUnavailable(f"LLM unavailable: {exc}") from exc
 
 
 def detect_contradictions(

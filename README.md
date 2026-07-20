@@ -23,28 +23,28 @@ Five autonomous agent flows, auto-routed from a single chat interface:
 ```mermaid
 flowchart TB
     Client["React + Vite\n(frontend)"]
-    API["FastAPI\n/api/runs  /api/knowledge\n/health  /api/graph"]
-    Workflow["LangGraph Workflow\n(workflow.py)"]
+    API["FastAPI\n/api/chat  /api/runs  /api/knowledge\n/health  /api/graph"]
+    Graph["Compiled LangGraph\n(graph/builder.py — execution engine)"]
     Router["LLM Router\n5 flows"]
-    RAG["Hybrid RAG\nBM25 60% + Vector 40%"]
+    RAG["Hybrid RAG + ReAct\nBM25 (FTS5) + Vector, RRF, rerank"]
     Knowledge[("SQLite\nKnowledge Docs")]
     Chroma[("ChromaDB\nVector Index")]
     JiraAPI["Jira Cloud\nREST API"]
     LLM["Groq LLM\nllama-3.3-70b-versatile"]
-    SQLite[("SQLite\nRuns + Events")]
+    SQLite[("SQLite\nRuns + Events + Checkpoints")]
     Export["Exports\n/backend/exports/"]
 
-    Client -->|"REST JSON"| API
-    API --> Workflow
-    Workflow --> Router
+    Client -->|"REST JSON / SSE"| API
+    API --> Graph
+    Graph --> Router
     Router -->|rag_qa / ticket| RAG
     RAG --> Knowledge
     RAG --> Chroma
     Router -->|jira_qa / hybrid_qa / report| JiraAPI
-    Workflow --> LLM
-    Workflow -->|approve| JiraAPI
-    Workflow -->|approve| Export
-    Workflow --> SQLite
+    Graph --> LLM
+    Graph -->|approve| JiraAPI
+    Graph -->|approve| Export
+    Graph --> SQLite
 ```
 
 ---
@@ -59,22 +59,14 @@ flowchart TD
     PV -->|"unknown project"| END2([END])
     PV -->|valid| RT[router]
 
-    RT -->|rag_qa| BRD[brd_retrieval]
-    BRD --> RAGQA[rag_qa_agent]
-    RAGQA --> END3([END])
-
-    RT -->|jira_qa| NL[nl_to_jql]
-    NL --> JS[jira_search]
-    JS --> JQA[jira_qa_agent]
-    JQA --> END4([END])
-
-    RT -->|hybrid_qa| HYB[hybrid_retrieval]
-    HYB --> HYBQA[hybrid_qa_agent]
-    HYBQA --> END5([END])
+    RT -->|"rag_qa / jira_qa / hybrid_qa"| RR[react_retrieval]
+    RR --> QA["matching *_qa_agent"]
+    QA --> END3([END])
 
     RT -->|ticket| ENH[requirement_enhancement]
     ENH --> TR[ticket_retrieval]
-    TR --> TG[ticket_generation]
+    TR --> CHK[contradiction_check]
+    CHK --> TG[ticket_generation]
     TG --> HA{human_approval}
 
     RT -->|report| JH[jira_health]
@@ -82,10 +74,10 @@ flowchart TD
     PL --> WR[writer]
     WR --> RV[reviewer]
     RV --> RC{reflection_check}
-    RC -->|"quality < 0.85\nAND revisions < 2"| WR
-    RC -->|"quality >= 0.85\nOR max revisions"| CC[confidence_check]
-    CC -->|"quality < 0.85\ninterrupt + warning"| HA
-    CC -->|"quality >= 0.85\nauto-continue"| HA
+    RC -->|"quality < 0.90\nAND revisions < 2"| WR
+    RC -->|"quality >= 0.90\nOR max revisions"| CC[confidence_check]
+    CC -->|"quality < 0.90\ninterrupt + warning"| HA
+    CC -->|"quality >= 0.90\nauto-continue"| HA
 
     HA -->|"approved ticket"| JT[jira_tool]
     HA -->|"approved report"| RE[report_export]
@@ -109,19 +101,21 @@ sequenceDiagram
     participant H as Human
     participant J as Jira Cloud
 
-    U->>API: POST /api/runs {text, flow="ticket", project_key}
-    API->>WF: start run
+    U->>API: POST /api/chat {text, project_key}
+    API->>WF: graph.ainvoke(initial state, thread_id=run_id)
     WF->>WF: PII validation + project validation
     WF->>LLM: route request → "ticket"
-    WF->>LLM: enhance requirement
-    WF->>RAG: hybrid search (BM25 + vector)
+    WF->>LLM: enhance requirement (PII redact)
+    WF->>RAG: ticket_retrieval — expand_query + hybrid search
     RAG-->>WF: ranked BRD documents
+    WF->>LLM: contradiction_check vs BRD
     WF->>LLM: generate ticket draft
+    WF->>WF: human_approval → interrupt() [checkpointed]
     WF-->>API: status=awaiting_approval + draft
     API-->>U: run_id + draft + execution trace
 
     U->>API: POST /api/runs/{run_id}/approve {approved: true}
-    API->>WF: resume approval
+    API->>WF: graph.ainvoke(Command(resume=...), thread_id=run_id)
     WF->>J: create Jira issue (ADF format)
     J-->>WF: issue key + URL
     WF-->>API: status=completed
@@ -142,14 +136,14 @@ sequenceDiagram
     participant H as Human Approval
 
     PL->>WR: plan (sections, title)
-    loop Until quality >= 0.85 or 2 revisions
+    loop Until quality >= 0.90 or 2 revisions
         WR->>RV: draft markdown
         RV->>RC: quality_score + review_notes
-        RC-->>WR: loop (quality < 0.85 AND revisions < 2)
+        RC-->>WR: loop (quality < 0.90 AND revisions < 2)
     end
     RC->>CC: exit loop
-    CC-->>H: interrupt + quality_warning (quality < 0.85)
-    CC-->>H: auto-continue (quality >= 0.85)
+    CC-->>H: interrupt + quality_warning (quality < 0.90)
+    CC-->>H: auto-continue (quality >= 0.90)
     H-->>RE: approved → report_export
 ```
 
@@ -258,30 +252,34 @@ AI-Agent-JIRA/
 │   │   │   ├── report.py    # plan_report, write_report, review_report
 │   │   │   └── qa.py        # answer_from_rag, answer_from_jira, answer_hybrid, nl_to_jql
 │   │   ├── graph/
-│   │   │   ├── builder.py   # LangGraph topology (authoritative node/edge definitions)
+│   │   │   ├── builder.py   # LangGraph topology — the live execution engine
+│   │   │   ├── bridge.py    # GraphState (dict) ↔ RunState (pydantic) conversion
+│   │   │   ├── react_agent.py # ReAct tool-selection layer for rag_qa/jira_qa/hybrid_qa
 │   │   │   └── state.py     # GraphState TypedDict
 │   │   ├── tools/
-│   │   │   ├── jira.py      # Jira REST (health, search, create ticket — ADF format)
-│   │   │   ├── pii.py       # PII detection + redaction
-│   │   │   ├── retrieval.py # hybrid_search_tool (BM25 + vector)
+│   │   │   ├── jira.py      # Jira REST (health, search, create ticket — ADF format) + @tool wrappers
+│   │   │   ├── pii.py       # Presidio PII detection + redaction
+│   │   │   ├── retrieval.py # hybrid/bm25/vector search — plain + @tool wrappers
 │   │   │   ├── export.py    # Markdown report export
-│   │   │   └── state.py     # human_feedback helper
+│   │   │   └── state.py     # legacy helper, unused by current graph
 │   │   ├── retrievers/
-│   │   │   ├── bm25.py      # BM25 keyword retrieval
-│   │   │   ├── vector.py    # ChromaDB vector retrieval
-│   │   │   └── hybrid.py    # score fusion (60% BM25 + 40% vector)
+│   │   │   ├── bm25.py      # SQLite FTS5 keyword retrieval
+│   │   │   ├── vector.py    # ChromaDB vector retrieval (BGE-small-en-v1.5)
+│   │   │   └── hybrid.py    # RRF fusion + cross-encoder rerank
 │   │   ├── services/
 │   │   │   ├── llm.py       # invoke_llm / invoke_json (Groq wrapper)
 │   │   │   └── tokens.py    # per-task token budgets
 │   │   ├── prompts/
 │   │   │   ├── templates.py   # report flow prompts
 │   │   │   └── qa_templates.py # Q&A flow prompts
+│   │   ├── memory.py        # per-session_id conversation history (SQLite)
+│   │   ├── git_poller.py    # optional background BRD auto-pull (GIT_AUTO_PULL)
 │   │   ├── logging/
 │   │   │   └── logger.py    # track_node, append_event, log_* helpers
 │   │   ├── config.py        # env vars, temperature map, operating mode
 │   │   ├── database.py      # SQLite — runs, knowledge, execution log
 │   │   ├── models.py        # Pydantic models (RunState, ChatRequest, etc.)
-│   │   ├── workflow.py      # execution engine — all 5 flows
+│   │   ├── workflow.py      # entry-point glue — builds GraphState, calls graph.ainvoke/astream
 │   │   └── main.py          # FastAPI app + routes
 │   ├── tests/               # pytest test suite
 │   ├── exports/             # approved reports saved here
@@ -301,13 +299,13 @@ AI-Agent-JIRA/
 
 ## RAG design
 
-Ticket flow retrieves BRD knowledge documents using score fusion:
+BRD retrieval fuses two independent retrievers via Reciprocal Rank Fusion, then reorders with a cross-encoder:
 
 ```
-final_score = 0.60 × bm25_score + 0.40 × vector_score
+rrf_score = 1/(60 + rank_bm25) + 1/(60 + rank_vector)   →   reranked by cross-encoder
 ```
 
-Both component scores are preserved on the run for observability. ChromaDB stores sentence-transformer embeddings (`all-MiniLM-L6-v2`). BM25 uses `rank-bm25`. Production path: swap vector proxy for OpenAI/Cohere embeddings + managed vector store, add reranking.
+Both component scores are preserved on the run for observability. BM25 = native SQLite FTS5 (no external library). Vector = ChromaDB with `BAAI/bge-small-en-v1.5` embeddings. Reranker = `ms-marco-MiniLM-L-6-v2`. A ReAct layer lets the LLM choose which retrieval tool(s) to call per question rather than hardcoding one path. See [`docs/RAG.md`](docs/RAG.md). Production path: swap the local vector store for a managed one (Pinecone/Weaviate/pgvector).
 
 ---
 
@@ -346,7 +344,7 @@ docker run -p 8000:8000 --env-file .env ai-agent-jira
 
 - Replace SQLite with Postgres
 - Replace ChromaDB local store with managed vector DB (Pinecone, Weaviate, etc.)
-- Enable LangGraph checkpointer for durable approval state
+- Replace `AsyncSqliteSaver` checkpointer with a Postgres-backed LangGraph checkpointer for multi-instance durability (already durable for single-instance deploys)
 - Protect `/api/` with authentication + rate limiting
 - Set CORS to deployed frontend origin only
 - Use Jira least-privilege API token (create/read only)
@@ -360,10 +358,10 @@ docker run -p 8000:8000 --env-file .env ai-agent-jira
 |-------|-----------|
 | Frontend | React 18, Vite, vanilla CSS |
 | Backend | FastAPI, Uvicorn, Python 3.11 |
-| Orchestration | LangGraph 0.2, LangChain Core |
+| Orchestration | LangGraph (compiled graph is the execution engine), LangChain Core |
 | LLM | Groq (`llama-3.3-70b-versatile`) |
-| RAG | rank-bm25, ChromaDB, sentence-transformers |
-| Persistence | SQLite (runs + knowledge), ChromaDB (vectors) |
+| RAG | SQLite FTS5 (BM25), ChromaDB + `bge-small-en-v1.5`, `ms-marco-MiniLM-L-6-v2` reranker, ReAct tool selection |
+| Persistence | SQLite (runs + knowledge + conversation history + checkpoints), ChromaDB (vectors) |
 | Jira | Atlassian REST API v3 (ADF ticket format) |
 | Observability | LangSmith, structured agent.log, UI execution trace |
 | Tests | pytest |

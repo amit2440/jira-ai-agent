@@ -16,11 +16,21 @@ class GraphState(TypedDict, total=False):
     # ── Pipeline state ──────────────────────────────────────────────────────────
     status: Literal["running", "awaiting_approval", "completed", "rejected", "failed"]
     router_decision: str | None
+    skip_project_validation: bool   # legacy /api/runs entry point never validated project_key
 
     # ── Retrieval ───────────────────────────────────────────────────────────────
     retrieved_documents: list[dict[str, Any]]
+    brd_docs: list[dict[str, Any]]   # react_retrieval split — BRD half, consumed by rag/hybrid agents
+    jira_docs: list[dict[str, Any]]  # react_retrieval split — Jira half, consumed by jira/hybrid agents
     enhanced_text: str | None   # post requirement-enhancement text (ticket flow)
+    grounded_requirement: str | None  # BRD-grounded rewrite from contradiction_check (ticket flow)
+    contradictions: list[dict[str, Any]]
+    ambiguities: list[dict[str, Any]]
     jql_query: str | None       # generated JQL string (jira_qa flow)
+
+    # ── Report pipeline scratch (report flow) ─────────────────────────────────────
+    plan: dict[str, Any]
+    report: dict[str, Any]
 
     # ── LLM / action output ─────────────────────────────────────────────────────
     result: dict[str, Any]
@@ -47,3 +57,8 @@ class GraphState(TypedDict, total=False):
     model: str | None
     total_tokens: int
     prompt_version: str
+    llm_params: dict[str, Any] | None
+
+    # ── Gap-cycling (ticket flow, chat continuity) ────────────────────────────────
+    pending_gaps: list[str]
+    pending_topic: str

@@ -36,7 +36,7 @@ Returns `{"title": "…", "sections": ["Executive Summary", "Issue Metrics", …
 Hard rules: use only Jira data provided, cite ticket keys for every claim, severity table must use priority breakdown from data, blockers section must state exactly what Jira says (no speculation). Returns `{"markdown": "…"}`.
 
 ### `REPORT_REVIEWER_SYSTEM` (`prompts/templates.py`)
-Checks for speculative language, health rating without evidence, generic conclusions. Returns `{"markdown": "…", "notes": […], "quality_score": 0.0–1.0}`. `quality_score ≥ 0.85` = stakeholder-ready.
+Checks for speculative language, health rating without evidence, generic conclusions. Returns `{"markdown": "…", "notes": […], "quality_score": 0.0–1.0}`. `quality_score ≥ 0.90` = stakeholder-ready (`_QUALITY_THRESHOLD` in `graph/builder.py`).
 
 ### `RAG_QA_SYSTEM` (`prompts/qa_templates.py`)
 Grounded in provided documents only. "Do not hallucinate." Cite source document titles inline. Output includes `## Confidence` section with `Level: high|medium|low` and `Explanation:`.
