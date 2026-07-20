@@ -91,9 +91,9 @@ def ingest(pdf_path: Path, project_key: str) -> None:
         chunk.metadata["title"] = f"{project_key} BRD - Page {chunk.metadata.get('page', 0) + 1} (Part {i})"
         chunk.metadata["project_key"] = project_key
 
-    logging.info("Initializing HuggingFace embeddings (BGE-large — first run downloads ~1.3GB)…")
+    logging.info("Initializing HuggingFace embeddings (BGE-small — first run downloads ~130MB)…")
     embeddings = HuggingFaceEmbeddings(
-        model_name="BAAI/bge-large-en-v1.5",
+        model_name="BAAI/bge-small-en-v1.5",
         encode_kwargs={"normalize_embeddings": True},
     )
 

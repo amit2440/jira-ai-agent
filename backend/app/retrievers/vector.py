@@ -21,7 +21,7 @@ def _get_vectorstore():
             _log.warning(f"Chroma DB not found at {CHROMA_DB_DIR}. Returning empty results.")
             return None
         embeddings = HuggingFaceEmbeddings(
-            model_name="BAAI/bge-large-en-v1.5",
+            model_name="BAAI/bge-small-en-v1.5",
             encode_kwargs={"normalize_embeddings": True},
         )
         _vectorstore = Chroma(
@@ -61,7 +61,7 @@ def vector_search(query: str, limit: int = 5, project_key: str | None = None) ->
             })
         return sorted(ranked, key=lambda x: x["score"], reverse=True)
 
-    # BGE-large asymmetric retrieval: prepend task instruction to query only (not to documents)
+    # BGE-small asymmetric retrieval: prepend task instruction to query only (not to documents)
     retrieval_query = f"Represent this sentence for searching relevant passages: {query}"
 
     try:

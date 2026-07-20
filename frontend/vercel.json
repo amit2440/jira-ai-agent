@@ -8,11 +8,14 @@
       "source": "/health",
       "destination": "https://sandblast-petty-salute.ngrok-free.dev/health"
     },
-    { "source": "/(.*)", "destination": "/index.html" }
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
   ],
   "build": {
     "env": {
-      "VITE_API_URL": "https://sandblast-petty-salute.ngrok-free.dev/api"
+      "VITE_API_URL": "/api"
     }
   }
 }

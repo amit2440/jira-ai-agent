@@ -1,0 +1,24 @@
+---
+on_http_request:
+  - name: handle-preflight
+    expressions:
+      - "req.method == 'OPTIONS'"
+    actions:
+      - type: custom-response
+        config:
+          status_code: 204
+          headers:
+            Access-Control-Allow-Origin: "*"
+            Access-Control-Allow-Methods: "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+            Access-Control-Allow-Headers: "Content-Type, Authorization, ngrok-skip-browser-warning, *"
+            Access-Control-Max-Age: "86400"
+
+on_http_response:
+  - name: add-cors-headers
+    actions:
+      - type: add-headers
+        config:
+          headers:
+            Access-Control-Allow-Origin: "*"
+            Access-Control-Allow-Methods: "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+            Access-Control-Allow-Headers: "Content-Type, Authorization, ngrok-skip-browser-warning, *"
