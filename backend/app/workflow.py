@@ -268,11 +268,26 @@ def _qa_flow(run: RunState) -> ChatResponse:
             _run=run,
         )
         _add_tokens(run, react_meta)
+
+        # For BRD flows: expand query and merge results across variants (restores old recall)
+        queries = [run.text]
+        if run.flow in ("rag_qa", "hybrid_qa") and brd_docs is not None:
+            queries = expand_query(run.text, _run=run)
+            if len(queries) > 1:
+                seen: dict[str, dict] = {(d.get("id") or d.get("title")): d for d in brd_docs}
+                for q in queries[1:]:
+                    for doc in hybrid_search_tool(q, limit=8, project_key=run.project_key):
+                        key = doc.get("id") or doc.get("title")
+                        if key not in seen or doc.get("score", 0) > seen[key].get("score", 0):
+                            seen[key] = doc
+                brd_docs = sorted(seen.values(), key=lambda d: d.get("rerank_score", d.get("score", 0)), reverse=True)[:8]
+
         run.retrieved_documents = brd_docs + jira_docs
         ev.detail.update({
             "brd_docs": len(brd_docs),
             "jira_docs": len(jira_docs),
             "flow_hint": run.flow,
+            "query_variants": len(queries) if run.flow in ("rag_qa", "hybrid_qa") else 1,
         })
     log_retrieval(run, len(run.retrieved_documents), "react_retrieval",
                   titles=[d.get("title", "") for d in run.retrieved_documents[:8]])
