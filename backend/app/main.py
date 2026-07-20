@@ -36,7 +36,7 @@ def _auto_ingest() -> None:
 app = FastAPI(title="EOMS Requirements Intelligence Assistant", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )

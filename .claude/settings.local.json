@@ -44,7 +44,8 @@
       "Bash(python3 -c \"from app.tools.retrieval import hybrid_search_tool; print\\(type\\(hybrid_search_tool\\)\\); print\\('OK'\\)\")",
       "Bash(git commit -m ' *)",
       "Bash(git add *)",
-      "Bash(xargs ls -la)"
+      "Bash(xargs ls -la)",
+      "Bash(printenv ALLOWED_ORIGINS)"
     ]
   }
 }
