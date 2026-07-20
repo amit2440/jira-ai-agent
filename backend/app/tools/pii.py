@@ -1,8 +1,8 @@
+import re
 from typing import Any
 
 from presidio_analyzer import AnalyzerEngine
 from presidio_anonymizer import AnonymizerEngine
-
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
 _provider = NlpEngineProvider(nlp_configuration={
@@ -12,36 +12,38 @@ _provider = NlpEngineProvider(nlp_configuration={
 _analyzer = AnalyzerEngine(nlp_engine=_provider.create_engine())
 _anonymizer = AnonymizerEngine()
 
-
-_PII_SCORE_THRESHOLD = 0.85
-
-# Entity types that are not sensitive — org/location names in project context are expected
-_PII_IGNORE_TYPES = {"ORGANIZATION", "LOCATION", "DATE_TIME", "NRP"}
-
-# Product/tool names spaCy misclassifies as PERSON
-_KNOWN_NON_PERSONS = {
-    "jira", "confluence", "github", "gitlab", "slack", "eoms", "brd",
-    # Product/system names misclassified as PERSON by spaCy
-    "active directory", "active", "directory", "azure", "ldap", "okta", "workday",
-    "servicenow", "sap", "oracle", "salesforce", "sharepoint", "teams",
-    # Jira/agile terms misclassified as PERSON
-    "sprint", "backlog", "epic", "scrum", "kanban", "agile",
+# Only block these sensitive financial/identity entity types
+_PII_BLOCK_TYPES = {
+    "CREDIT_CARD",       # card numbers
+    "EMAIL_ADDRESS",     # email
+    "PHONE_NUMBER",      # phone
+    "US_SSN",            # US social security number
+    "IN_AADHAAR",        # Aadhaar number (12-digit Indian ID)
 }
+
+# Aadhaar: 12-digit number (XXXX XXXX XXXX)
+_AADHAAR_RE = re.compile(r"\b\d{4}[\s\-]?\d{4}[\s\-]?\d{4}\b")
+# SSN: XXX-XX-XXXX or XXX XX XXXX
+_SSN_RE = re.compile(r"\b\d{3}[\s\-]\d{2}[\s\-]\d{4}\b")
 
 
 def pii_validator(text: str) -> dict[str, Any]:
     results = _analyzer.analyze(text=text, language="en")
     findings = [
         r.entity_type for r in results
-        if r.score >= _PII_SCORE_THRESHOLD
-        and r.entity_type not in _PII_IGNORE_TYPES
-        and text[r.start:r.end].lower() not in _KNOWN_NON_PERSONS
+        if r.entity_type in _PII_BLOCK_TYPES
     ]
+    # Regex fallbacks for entities Presidio misses with en_core_web_sm
+    if "IN_AADHAAR" not in findings and _AADHAAR_RE.search(text):
+        findings.append("IN_AADHAAR")
+    if "US_SSN" not in findings and _SSN_RE.search(text):
+        findings.append("US_SSN")
     return {"safe": not findings, "findings": findings}
 
 
 def redact(text: str) -> str:
     results = _analyzer.analyze(text=text, language="en")
-    if not results:
+    relevant = [r for r in results if r.entity_type in _PII_BLOCK_TYPES]
+    if not relevant:
         return text
-    return _anonymizer.anonymize(text=text, analyzer_results=results).text
+    return _anonymizer.anonymize(text=text, analyzer_results=relevant).text

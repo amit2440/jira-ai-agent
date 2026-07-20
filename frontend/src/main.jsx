@@ -125,7 +125,7 @@ function GraphModal({ onClose }) {
   const bodyRef                         = useRef(null);
 
   useEffect(() => {
-    fetch(`${API}/graph`)
+    fetch(`${API}/graph`, { headers: { "ngrok-skip-browser-warning": "true" } })
       .then(r => r.json())
       .then(async data => {
         if (data.mermaid) {
@@ -201,6 +201,16 @@ function ParamBadge({ isDefault }) {
 }
 
 /* ── Main App ────────────────────────────────────────────────────────────── */
+function _getOrCreateSessionId() {
+  const KEY = "eoms_session_id";
+  let sid = localStorage.getItem(KEY);
+  if (!sid) {
+    sid = crypto.randomUUID();
+    localStorage.setItem(KEY, sid);
+  }
+  return sid;
+}
+
 function App() {
   const [messages, setMessages]     = useState([]);
   const [input, setInput]           = useState("");
@@ -213,6 +223,9 @@ function App() {
   const [temperature, setTemperature] = useState(DEFAULT_PARAMS.temperature);
   const [maxTokens, setMaxTokens]     = useState(DEFAULT_PARAMS.maxTokens);
   const [projectKey, setProjectKey]   = useState("EOMS");
+
+  // Stable session id — persisted in localStorage so history survives page reload
+  const sessionId = useRef(_getOrCreateSessionId());
 
   const threadRef   = useRef(null);
   const textareaRef = useRef(null);
@@ -293,6 +306,7 @@ function App() {
     const payload = {
       text: query,
       project_key: projectKey,
+      session_id: sessionId.current,
       llm_params: {
         temperature: parseFloat(temperature),
         max_tokens:  parseInt(maxTokens, 10),

@@ -73,6 +73,7 @@ from .tools.jira import jira_create_ticket, jira_project_exists, jira_project_he
 from .tools.pii import pii_validator
 from .tools.retrieval import hybrid_search_tool
 from .tools.state import human_feedback
+from .memory import append_turn, format_history_for_prompt, get_history
 
 # Projects the report flow is scoped to. Non-matching projects return an error.
 ALLOWED_REPORT_PROJECTS = {"EOMS"}
@@ -160,13 +161,15 @@ def chat(req: ChatRequest) -> ChatResponse:
     Routes to the correct flow and returns either an immediate answer (Q&A flows)
     or a draft awaiting approval (ticket/report flows).
     """
+    session_id = req.session_id or str(uuid.uuid4())
     run = RunState(
         thread_id=str(uuid.uuid4()),
         run_id=str(uuid.uuid4()),
         text=req.text,
         flow=None,
         project_key=(req.project_key or JIRA_PROJECT_KEY or "EOMS").upper(),
-        llm_params=req.llm_params
+        llm_params=req.llm_params,
+        session_id=session_id,
     )
 
     log_run_start(run)
@@ -228,9 +231,13 @@ def chat(req: ChatRequest) -> ChatResponse:
     log_context_snapshot(run, "POST_ROUTER")
     save_run(run)
 
+    # ── LOAD CONVERSATION HISTORY ─────────────────────────────────────
+    history = get_history(session_id)
+    append_turn(session_id, "user", run.text, flow=None)  # log user turn now
+
     # ── DISPATCH ──────────────────────────────────────────────────────
     if run.flow in ("rag_qa", "jira_qa", "hybrid_qa"):
-        return _qa_flow(run)
+        return _qa_flow(run, history=history, session_id=session_id)
     elif run.flow == "ticket":
         return _ticket_flow_as_chat(run)
     elif run.flow == "report":
@@ -251,13 +258,14 @@ def chat(req: ChatRequest) -> ChatResponse:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @traceable(name="qa_flow", run_type="chain")
-def _qa_flow(run: RunState) -> ChatResponse:
+def _qa_flow(run: RunState, history: list | None = None, session_id: str | None = None) -> ChatResponse:
     """
     Unified Q&A flow: ReAct agent picks retrieval tools dynamically,
     then original answer_from_* synthesizers produce the final answer.
     """
     _stamp_ls_metadata(run)
     log_state(run, f"{run.flow.upper()}_START")
+    history_prompt = format_history_for_prompt(history or [], max_turns=6)
 
     # ── REACT RETRIEVAL ───────────────────────────────────────────────
     with track_node(run, "react_retrieval", f"ReAct tool selection ({run.flow})", "tool") as ev:
@@ -295,7 +303,10 @@ def _qa_flow(run: RunState) -> ChatResponse:
     # ── SYNTHESIS via original answer functions ───────────────────────
     if run.flow == "rag_qa":
         with track_node(run, "rag_qa_agent", "RAG answer generated", "function") as ev:
-            payload, meta = answer_from_rag(run.text, brd_docs, _run=run, project_key=run.project_key)
+            payload, meta = answer_from_rag(
+                run.text, brd_docs, _run=run, project_key=run.project_key,
+                history=history_prompt,
+            )
             _add_tokens(run, meta)
             ev.detail["confidence"] = payload.get("confidence", "high")
             ev.detail["sources_count"] = len(payload.get("sources_used", []))
@@ -304,7 +315,10 @@ def _qa_flow(run: RunState) -> ChatResponse:
 
     elif run.flow == "jira_qa":
         with track_node(run, "jira_qa_agent", "Jira Q&A answer generated", "function") as ev:
-            payload, meta = answer_from_jira(run.text, jira_docs, _run=run, project_key=run.project_key)
+            payload, meta = answer_from_jira(
+                run.text, jira_docs, _run=run, project_key=run.project_key,
+                history=history_prompt,
+            )
             _add_tokens(run, meta)
             ev.detail["confidence"] = payload.get("confidence", "medium")
         source_type = "jira"
@@ -312,7 +326,10 @@ def _qa_flow(run: RunState) -> ChatResponse:
 
     else:  # hybrid_qa
         with track_node(run, "hybrid_qa_agent", "Hybrid gap analysis generated", "function") as ev:
-            payload, meta = answer_hybrid(run.text, brd_docs, jira_docs, _run=run, project_key=run.project_key)
+            payload, meta = answer_hybrid(
+                run.text, brd_docs, jira_docs, _run=run, project_key=run.project_key,
+                history=history_prompt,
+            )
             _add_tokens(run, meta)
             ev.detail["confidence"] = payload.get("confidence", "medium")
             ev.detail["gaps"] = len(payload.get("gaps", []))
@@ -326,6 +343,12 @@ def _qa_flow(run: RunState) -> ChatResponse:
     log_finalize(run)
     save_run(run)
     log_run_end(run)
+
+    # Persist assistant answer to conversation history
+    if session_id:
+        answer_text = payload.get("answer", "")
+        if isinstance(answer_text, str):
+            append_turn(session_id, "assistant", answer_text[:1000], flow=run.flow)
 
     pending = None
     if run.flow == "hybrid_qa":

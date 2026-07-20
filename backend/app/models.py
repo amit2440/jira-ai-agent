@@ -56,6 +56,7 @@ class RunState(BaseModel):
     text: str
     flow: Flow | None = None
     project_key: str | None = None
+    session_id: str | None = None          # stable across turns; used for conversation history
     status: Status = "running"
     router_decision: str | None = None
     prompt_version: str = PROMPT_VERSION

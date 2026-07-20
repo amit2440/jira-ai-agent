@@ -35,10 +35,12 @@ RAG_QA_SYSTEM = (
 )
 
 
-def rag_qa_prompt(question: str, context: str, project_key: str | None = None) -> str:
+def rag_qa_prompt(question: str, context: str, project_key: str | None = None, history: str = "") -> str:
     scope = f"ACTIVE PROJECT: {project_key}\n" if project_key else ""
+    history_block = f"CONVERSATION HISTORY (for context only — do not cite as sources):\n{history}\n\n" if history else ""
     return (
         f"{scope}"
+        f"{history_block}"
         f"QUESTION:\n{question}\n\n"
         f"DOCUMENT EXCERPTS (ONLY sources you may cite or draw facts from):\n"
         f"{context}\n\n"
@@ -61,10 +63,12 @@ JIRA_QA_SYSTEM = (
 )
 
 
-def jira_qa_prompt(question: str, jira_context: str, project_key: str | None = None) -> str:
+def jira_qa_prompt(question: str, jira_context: str, project_key: str | None = None, history: str = "") -> str:
     scope = f"ACTIVE PROJECT: {project_key}\n" if project_key else ""
+    history_block = f"CONVERSATION HISTORY (for context — resolving pronouns/scope references):\n{history}\n\n" if history else ""
     return (
         f"{scope}"
+        f"{history_block}"
         f"QUESTION:\n{question}\n\n"
         f"LIVE JIRA DATA:\n{jira_context}\n\n"
         "Answer the question using ONLY the above Jira data scoped to the active project. "
@@ -144,8 +148,9 @@ HYBRID_QA_SYSTEM = (
 )
 
 
-def hybrid_qa_prompt(question: str, brd_context: str, jira_context: str, project_key: str | None = None) -> str:
+def hybrid_qa_prompt(question: str, brd_context: str, jira_context: str, project_key: str | None = None, history: str = "") -> str:
     scope = f"ACTIVE PROJECT: {project_key}\n" if project_key else ""
+    history_block = f"CONVERSATION HISTORY (prior questions/answers for context):\n{history}\n\n" if history else ""
     jira_unavailable = not jira_context.strip() or "not configured" in jira_context.lower() or "unavailable" in jira_context.lower()
     jira_section = (
         "LIVE JIRA TICKETS: [NO DATA — Jira is not configured. Mark ALL requirements as ❌ Missing. "
@@ -155,6 +160,7 @@ def hybrid_qa_prompt(question: str, brd_context: str, jira_context: str, project
     )
     return (
         f"{scope}"
+        f"{history_block}"
         f"QUESTION:\n{question}\n\n"
         f"BRD REQUIREMENTS (extract each distinct requirement):\n{brd_context}\n\n"
         f"{jira_section}\n"

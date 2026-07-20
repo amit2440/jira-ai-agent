@@ -143,7 +143,7 @@ def jira_project_health(project_key: str | None = None, scope: str = "all") -> l
     fields = ["summary", "status", "issuetype", "priority", "labels", "key"]
 
     sprint_jql  = f"project = {project} AND issuetype != Epic AND sprint in openSprints() ORDER BY updated DESC"
-    backlog_jql = f"project = {project} AND issuetype != Epic AND (sprint not in openSprints() OR sprint is EMPTY) ORDER BY updated DESC"
+    backlog_jql = f"project = {project} AND issuetype != Epic AND sprint is EMPTY ORDER BY updated DESC"
     all_jql     = f"project = {project} AND issuetype != Epic ORDER BY updated DESC"
 
     def _fetch(jql: str, max_results: int = 100) -> list:

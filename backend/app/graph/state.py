@@ -39,6 +39,10 @@ class GraphState(TypedDict, total=False):
     reviewer_feedback: str       # concatenated reviewer notes passed back to writer
     quality_warning: bool        # True when quality < 0.85 after all revisions — triggers interrupt
 
+    # ── Conversational memory ───────────────────────────────────────────────────
+    session_id: str | None          # stable across turns in the same session
+    conversation_history: list      # prior turns [{role, content, flow, timestamp}]
+
     # ── Observability ───────────────────────────────────────────────────────────
     model: str | None
     total_tokens: int

@@ -30,6 +30,7 @@ Decision points
 """
 from typing import Literal
 
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from .state import GraphState
@@ -99,6 +100,11 @@ def _requirement_enhancement(state: GraphState) -> dict:
 def _ticket_retrieval(state: GraphState) -> dict:
     """Retrieve relevant BRD context to ground the ticket draft."""
     return {}
+
+
+def _contradiction_check(state: GraphState) -> dict:
+    """Check the enhanced requirement against BRD for contradictions and ambiguities."""
+    return {}  # contradiction analysis embedded in ticket_generation result
 
 
 def _ticket_generation(state: GraphState) -> dict:
@@ -247,6 +253,7 @@ def build_graph():
     # Ticket flow
     graph.add_node("requirement_enhancement", _requirement_enhancement)
     graph.add_node("ticket_retrieval",        _ticket_retrieval)
+    graph.add_node("contradiction_check",     _contradiction_check)
     graph.add_node("ticket_generation",       _ticket_generation)
 
     # Report flow
@@ -294,7 +301,8 @@ def build_graph():
 
     # ── Ticket flow ──
     graph.add_edge("requirement_enhancement", "ticket_retrieval")
-    graph.add_edge("ticket_retrieval",        "ticket_generation")
+    graph.add_edge("ticket_retrieval",        "contradiction_check")
+    graph.add_edge("contradiction_check",     "ticket_generation")
     graph.add_edge("ticket_generation",       "human_approval")
 
     # ── Report flow (reflection loop + confidence check) ──
@@ -318,4 +326,5 @@ def build_graph():
     graph.add_edge("report_export", "logging")
     graph.add_edge("logging",       END)
 
-    return graph.compile()
+    checkpointer = MemorySaver()
+    return graph.compile(checkpointer=checkpointer)

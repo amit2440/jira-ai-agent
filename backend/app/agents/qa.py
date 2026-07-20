@@ -83,6 +83,7 @@ def answer_from_rag(
     docs: list[dict[str, Any]],
     _run=None,
     project_key: str | None = None,
+    history: str = "",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Answer a question from BRD / knowledge documents via hybrid search."""
     tid = _tid(_run)
@@ -100,7 +101,7 @@ def answer_from_rag(
 
     try:
         meta = invoke_llm(
-            rag_qa_prompt(question, context, project_key=project_key),
+            rag_qa_prompt(question, context, project_key=project_key, history=history),
             task="planning",
             max_tokens=budget,
             system=RAG_QA_SYSTEM,
@@ -192,6 +193,7 @@ def answer_from_jira(
     jira_docs: list[dict[str, Any]],
     _run=None,
     project_key: str | None = None,
+    history: str = "",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Answer a question from live Jira metrics / search results."""
     tid = _tid(_run)
@@ -210,7 +212,7 @@ def answer_from_jira(
 
     try:
         payload, meta = invoke_json(
-            jira_qa_prompt(question, jira_context, project_key=project_key),
+            jira_qa_prompt(question, jira_context, project_key=project_key, history=history),
             task="structured",
             max_tokens=budget,
             system=JIRA_QA_SYSTEM,
@@ -244,6 +246,7 @@ def answer_hybrid(
     jira_docs: list[dict[str, Any]],
     _run=None,
     project_key: str | None = None,
+    history: str = "",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Cross-reference BRD docs and Jira data for implementation gap analysis."""
     tid = _tid(_run)
@@ -263,7 +266,7 @@ def answer_hybrid(
 
     try:
         payload, meta = invoke_json(
-            hybrid_qa_prompt(question, brd_context, jira_context, project_key=project_key),
+            hybrid_qa_prompt(question, brd_context, jira_context, project_key=project_key, history=history),
             task="creative",
             max_tokens=budget,
             system=HYBRID_QA_SYSTEM,
