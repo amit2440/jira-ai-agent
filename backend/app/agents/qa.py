@@ -275,17 +275,26 @@ def answer_hybrid(
             payload = _fallback_answer(question, "BRD + Jira")
         payload.setdefault("confidence_explanation", "")
 
-        # Recompute counts from the gaps array — single source of truth.
-        # The LLM populates gaps[] correctly per STEP 4 of the prompt; trust it over
-        # covered_count/total_count fields which the model sometimes miscounts.
+        # Recompute counts from gaps array (single source of truth) and patch answer text.
+        # The LLM's covered_count / summary line are often wrong; gaps[] is reliable.
+        import re as _re
         gaps = payload.get("gaps", [])
         json_total = payload.get("total_count", 0)
-        json_covered = json_total - len(gaps)
-        if json_covered < 0:
-            json_covered = 0
+        json_covered = max(0, json_total - len(gaps))
         pct = round(json_covered / json_total * 100) if json_total else 0
         payload["covered_count"] = json_covered
         payload["coverage_pct"] = pct
+
+        # Patch the summary line in the markdown so it matches the corrected numbers
+        answer_text = payload.get("answer", "")
+        gaps_list = ", ".join(gaps) if gaps else "none"
+        fixed_summary = f"{json_covered} of {json_total} requirements are covered ({pct}%). Missing: {gaps_list}."
+        payload["answer"] = _re.sub(
+            r"\d+ of \d+ requirements? are covered \(\d+%\)[^.\n]*\.?",
+            fixed_summary,
+            answer_text,
+            count=1,
+        )
         meta["token_budget"] = budget
         _log.info(
             f"{tid} [HYBRID_QA] Answer ready — "
