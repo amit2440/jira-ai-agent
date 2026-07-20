@@ -1,5 +1,15 @@
 {
-  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }],
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://sandblast-petty-salute.ngrok-free.dev/api/:path*"
+    },
+    {
+      "source": "/health",
+      "destination": "https://sandblast-petty-salute.ngrok-free.dev/health"
+    },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ],
   "build": {
     "env": {
       "VITE_API_URL": "https://sandblast-petty-salute.ngrok-free.dev/api"
