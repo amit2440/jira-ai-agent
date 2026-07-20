@@ -45,6 +45,7 @@ def _stamp_ls_metadata(run: "RunState") -> None:
         pass
 
 from .agents.qa import answer_from_jira, answer_from_rag, answer_hybrid, expand_query, nl_to_jql
+from .graph.react_agent import run_qa_react
 from .agents.report import plan_report, review_report, write_report
 from .agents.router import route_request
 from .agents.ticket import detect_contradictions, enhance_requirement, generate_ticket
@@ -228,12 +229,8 @@ def chat(req: ChatRequest) -> ChatResponse:
     save_run(run)
 
     # ── DISPATCH ──────────────────────────────────────────────────────
-    if run.flow == "rag_qa":
-        return _rag_qa_flow(run)
-    elif run.flow == "jira_qa":
-        return _jira_qa_flow(run)
-    elif run.flow == "hybrid_qa":
-        return _hybrid_qa_flow(run)
+    if run.flow in ("rag_qa", "jira_qa", "hybrid_qa"):
+        return _qa_flow(run)
     elif run.flow == "ticket":
         return _ticket_flow_as_chat(run)
     elif run.flow == "report":
@@ -253,201 +250,75 @@ def chat(req: ChatRequest) -> ChatResponse:
 # Q&A FLOWS (immediate, no approval)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@traceable(name="rag_qa_flow", run_type="chain")
-def _rag_qa_flow(run: RunState) -> ChatResponse:
-    """Answer from BRD knowledge documents via hybrid search."""
+@traceable(name="qa_flow", run_type="chain")
+def _qa_flow(run: RunState) -> ChatResponse:
+    """Unified Q&A flow via ReAct agent — handles rag_qa, jira_qa, and hybrid_qa."""
     _stamp_ls_metadata(run)
-    log_state(run, "RAG_QA_START")
-    with track_node(run, "brd_retrieval", "BRD documents retrieved (BM25 + vector + rerank)", "tool") as ev:
-        queries = expand_query(run.text, _run=run)
-        seen: dict[str, dict] = {}
-        for q in queries:
-            for doc in hybrid_search_tool(q, limit=8, project_key=run.project_key):
-                key = doc.get("id") or doc.get("title")
-                if key not in seen or doc.get("score", 0) > seen[key].get("score", 0):
-                    seen[key] = doc
-        docs = sorted(seen.values(), key=lambda d: d.get("rerank_score", d.get("score", 0)), reverse=True)[:8]
-        run.retrieved_documents = docs
-        bm25_count   = sum(1 for d in docs if d.get("bm25_score") is not None)
-        vector_count = sum(1 for d in docs if d.get("vector_score") is not None)
-        ev.detail.update({
-            "documents":    [{"title": d["title"], "score": d.get("score")} for d in docs],
-            "total":        len(docs),
-            "bm25_count":   bm25_count,
-            "vector_count": vector_count,
-            "query_variants": len(queries),
-        })
-    log_retrieval(run, len(docs), "brd_retrieval", titles=[d["title"] for d in docs])
+    log_state(run, f"{run.flow.upper()}_START")
 
-    with track_node(run, "rag_qa_agent", "RAG answer generated", "function") as ev:
-        payload, meta = answer_from_rag(run.text, docs, _run=run, project_key=run.project_key)
-        _add_tokens(run, meta)
-        ev.detail["confidence"] = payload.get("confidence", "high")
-        ev.detail["sources_count"] = len(payload.get("sources_used", []))
-        run.result = {"answer": payload}
-
-    run.status = "completed"
-    log_state(run, "RAG_QA_DONE", confidence=payload.get("confidence"))
-    log_context_snapshot(run, "RAG_QA_DONE")
-    log_finalize(run)
-    save_run(run)
-    log_run_end(run)
-
-    return ChatResponse(
-        run_id=run.run_id, thread_id=run.thread_id,
-        flow=run.flow, status="completed",
-        answer=payload,
-        sources=_make_source_refs(docs, "knowledge"),
-        events=run.events,
-        model=run.model, total_tokens=run.total_tokens,
-    )
-
-
-@traceable(name="jira_qa_flow", run_type="chain")
-def _jira_qa_flow(run: RunState) -> ChatResponse:
-    """Answer from live Jira data using NL→JQL."""
-    _stamp_ls_metadata(run)
-    log_state(run, "JIRA_QA_START")
-
-    # Step 1: Convert question to JQL
-    with track_node(run, "nl_to_jql", "JQL generated from question", "function"):
-        jql, jql_explanation, nl_meta = nl_to_jql(run.text, run.project_key or "EOMS", _run=run)
-        run.events[-1].detail.update({"jql": jql, "explanation": jql_explanation})
-        _add_tokens(run, nl_meta)
-    log_decision(run, "nl_to_jql", jql, jql_explanation)
-
-    # Step 2: Execute JQL and get results
-    with track_node(run, "jira_search", "Jira data retrieved", "tool"):
-        jira_result = jira_search(jql, max_results=10)
-        # Convert to doc format for the QA agent
-        if jira_result.get("mode") == "demo" or "issues" in jira_result:
-            issues = jira_result.get("issues", [])
-            jira_docs = [
-                {
-                    "title": f"{i['key']}: {i['summary']}",
-                    "content": f"Key: {i['key']} | Status: {i.get('status', 'Unknown')} | Summary: {i['summary']}",
-                    "source": "jira",
-                }
-                for i in issues
-            ]
-        else:
-            # Fallback to project health metrics
-            jira_docs = jira_project_health(run.project_key)
-        run.retrieved_documents = jira_docs
-        run.events[-1].detail["records"] = len(jira_docs)
-    log_retrieval(run, len(jira_docs), "jira_search", jql=jql)
-
-    # Step 3: Synthesise answer
-    with track_node(run, "jira_qa_agent", "Jira Q&A answer generated", "function"):
-        payload, meta = answer_from_jira(run.text, jira_docs, _run=run, project_key=run.project_key)
-        _add_tokens(run, meta)
-        run.result = {"answer": payload}
-
-    run.status = "completed"
-    log_state(run, "JIRA_QA_DONE", confidence=payload.get("confidence"))
-    log_finalize(run)
-    save_run(run)
-    log_run_end(run)
-
-    return ChatResponse(
-        run_id=run.run_id, thread_id=run.thread_id,
-        flow=run.flow, status="completed",
-        answer=payload,
-        sources=_make_source_refs(jira_docs, "jira"),
-        events=run.events,
-        model=run.model, total_tokens=run.total_tokens,
-    )
-
-
-@traceable(name="hybrid_qa_flow", run_type="chain")
-def _hybrid_qa_flow(run: RunState) -> ChatResponse:
-    """Cross-reference BRD docs and Jira for implementation gap analysis."""
-    _stamp_ls_metadata(run)
-    log_state(run, "HYBRID_QA_START")
-
-    # Step 1: BRD retrieval
-    with track_node(run, "brd_retrieval", "BRD documents retrieved (BM25 + vector)", "tool"):
-        brd_docs = hybrid_search_tool(run.text, limit=5, project_key=run.project_key)
-        bm25_count   = sum(1 for d in brd_docs if d.get("bm25_score") is not None)
-        vector_count = sum(1 for d in brd_docs if d.get("vector_score") is not None)
-        run.events[-1].detail.update({
-            "brd_count":    len(brd_docs),
-            "total":        len(brd_docs),
-            "bm25_count":   bm25_count,
-            "vector_count": vector_count,
-        })
-    log_retrieval(run, len(brd_docs), "brd_retrieval", titles=[d["title"] for d in brd_docs])
-
-    # Step 2: Jira retrieval — fetch actual ticket summaries so LLM can match requirements 1:1
-    with track_node(run, "jira_search", "Jira tickets retrieved for coverage analysis", "tool") as ev:
-        jql = f"project = {run.project_key} ORDER BY updated DESC"
-        jira_result = jira_search(jql, max_results=50)
-        issues = jira_result.get("issues", [])
-        jira_docs = [
-            {
-                "title": f"{i['key']}: {i['summary']}",
-                "content": f"Key: {i['key']} | Status: {i.get('status', 'Unknown')} | Summary: {i['summary']}",
-                "source": "jira",
-            }
-            for i in issues
-        ]
-        # Fall back to health metrics if search returned nothing (demo mode with no issues)
-        if not jira_docs:
-            jira_docs = jira_project_health(run.project_key)
-        ev.detail["jira_count"] = len(jira_docs)
-        ev.detail["mode"] = jira_result.get("mode", "unknown")
-    log_retrieval(run, len(jira_docs), "jira_search", jql=jql)
-
-    run.retrieved_documents = brd_docs + jira_docs
-    log_context_snapshot(run, "HYBRID_QA_RETRIEVED")
-
-    # Step 3: Cross-reference and synthesise
-    with track_node(run, "hybrid_qa_agent", "Hybrid gap analysis generated", "function"):
-        payload, meta = answer_hybrid(run.text, brd_docs, jira_docs, _run=run, project_key=run.project_key)
-        _add_tokens(run, meta)
-        run.result = {"answer": payload}
-
-    run.status = "completed"
-    log_state(run, "HYBRID_QA_DONE",
-              confidence=payload.get("confidence"),
-              gaps=len(payload.get("gaps", [])))
-    log_finalize(run)
-    save_run(run)
-    log_run_end(run)
-
-    gaps = payload.get("gaps", [])
-    pending = None
-    if gaps:
-        import re as _re
-        # infer topic from the original question (security / performance / integration …)
-        _topic_patterns = {
-            "security": r"\b(security|auth|authentication|authorization|rbac|jwt|permission)\b",
-            "performance": r"\b(performance|sla|latency|throughput|scalability)\b",
-            "integration": r"\b(integrat|api|external|third.party|connect)\b",
-            "document": r"\b(document|upload|attach|file|storage)\b",
-        }
-        topic = ""
-        for _cat, _pat in _topic_patterns.items():
-            if _re.search(_pat, run.text, _re.I):
-                topic = _cat
-                break
-        pending = PendingAction(
-            type="generate_tickets",
-            description=f"Generate Jira stories for {len(gaps)} missing requirements",
-            gaps=gaps,
-            topic=topic,
+    with track_node(run, "react_agent", f"ReAct agent ({run.flow})", "function") as ev:
+        payload, docs, meta = run_qa_react(
+            run.text,
+            project_key=run.project_key,
+            flow_hint=run.flow,
+            _run=run,
         )
+        _add_tokens(run, meta)
+        run.retrieved_documents = docs
+        ev.detail.update({
+            "confidence": payload.get("confidence", "medium"),
+            "docs_retrieved": len(docs),
+            "flow_hint": run.flow,
+        })
+        run.result = {"answer": payload}
 
-    all_sources = _make_source_refs(brd_docs, "knowledge") + _make_source_refs(jira_docs, "jira")
+    run.status = "completed"
+    log_state(run, f"{run.flow.upper()}_DONE", confidence=payload.get("confidence"))
+    log_context_snapshot(run, f"{run.flow.upper()}_DONE")
+    log_finalize(run)
+    save_run(run)
+    log_run_end(run)
+
+    # For hybrid_qa: build pending action from gaps so UI can offer to generate tickets
+    pending = None
+    if run.flow == "hybrid_qa":
+        gaps = payload.get("gaps", [])
+        if gaps:
+            import re as _re
+            _topic_patterns = {
+                "security": r"\b(security|auth|authentication|authorization|rbac|jwt|permission)\b",
+                "performance": r"\b(performance|sla|latency|throughput|scalability)\b",
+                "integration": r"\b(integrat|api|external|third.party|connect)\b",
+                "document": r"\b(document|upload|attach|file|storage)\b",
+            }
+            topic = ""
+            for _cat, _pat in _topic_patterns.items():
+                if _re.search(_pat, run.text, _re.I):
+                    topic = _cat
+                    break
+            pending = PendingAction(
+                type="generate_tickets",
+                description=f"Generate Jira stories for {len(gaps)} missing requirements",
+                gaps=gaps,
+                topic=topic,
+            )
+
+    source_type = "jira" if run.flow == "jira_qa" else "knowledge"
     return ChatResponse(
         run_id=run.run_id, thread_id=run.thread_id,
         flow=run.flow, status="completed",
         answer=payload,
-        sources=all_sources,
+        sources=_make_source_refs(docs, source_type),
         events=run.events,
         model=run.model, total_tokens=run.total_tokens,
         pending_action=pending,
     )
+
+
+# Keep legacy names as aliases so any direct callers don't break
+_rag_qa_flow = _qa_flow
+_jira_qa_flow = _qa_flow
+_hybrid_qa_flow = _qa_flow
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -761,21 +632,11 @@ def start(req: RunRequest) -> RunState:
 
     # Dispatch to appropriate pipeline
     if run.flow in ("rag_qa", "jira_qa", "hybrid_qa"):
-        # Q&A flows — convert to chat and return embedded in run
-        if run.flow == "rag_qa":
-            docs = hybrid_search_tool(run.text)
-            run.retrieved_documents = docs
-            payload, meta = answer_from_rag(run.text, docs, _run=run, project_key=run.project_key)
-        elif run.flow == "jira_qa":
-            jira_docs = jira_project_health(run.project_key)
-            run.retrieved_documents = jira_docs
-            payload, meta = answer_from_jira(run.text, jira_docs, _run=run, project_key=run.project_key)
-        else:
-            brd_docs = hybrid_search_tool(run.text)
-            jira_docs = jira_project_health(run.project_key)
-            run.retrieved_documents = brd_docs + jira_docs
-            payload, meta = answer_hybrid(run.text, brd_docs, jira_docs, _run=run, project_key=run.project_key)
+        payload, docs, meta = run_qa_react(
+            run.text, project_key=run.project_key, flow_hint=run.flow, _run=run
+        )
         _add_tokens(run, meta)
+        run.retrieved_documents = docs
         run.result = {"answer": payload}
         run.status = "completed"
         log_finalize(run)

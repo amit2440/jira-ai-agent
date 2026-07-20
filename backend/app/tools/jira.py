@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+from langchain_core.tools import tool
 
 from ..config import JIRA_API_TOKEN, JIRA_BASE_URL, JIRA_EMAIL, JIRA_PROJECT_KEY, jira_enabled
 
@@ -256,3 +257,17 @@ def jira_project_health(project_key: str | None = None) -> list[dict[str, Any]]:
 
     except Exception as e:
         return [{"title": "Jira Error", "content": f"Failed to fetch Jira metrics: {str(e)}", "score": 1.0}]
+
+
+
+# @tool wrappers — used by the ReAct agent (StructuredTool, not directly callable)
+@tool
+def jira_search_react(jql: str, max_results: int = 5) -> dict[str, Any]:
+    """Execute a JQL query against Jira and return matching issues. Use for ticket lookups, status checks, and sprint queries."""
+    return jira_search(jql, max_results=max_results)
+
+
+@tool
+def jira_project_health_react(project_key: str | None = None) -> list[dict[str, Any]]:
+    """Fetch project health summary from Jira: issue counts, open bugs by priority, blockers, completion rate. Use for status/health questions."""
+    return jira_project_health(project_key=project_key)
