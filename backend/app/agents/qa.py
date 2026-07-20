@@ -275,38 +275,17 @@ def answer_hybrid(
             payload = _fallback_answer(question, "BRD + Jira")
         payload.setdefault("confidence_explanation", "")
 
-        # Guard: parse ✅/❌ counts directly from the rendered markdown table.
-        # This is the only reliable source — JSON fields may be internally consistent
-        # but disagree with the actual table rows (e.g. model claims 7 rows but built 6).
-        import re as _re
-        answer_text = payload.get("answer", "")
-        table_covered = len(_re.findall(r'^\|[^|\n]*\|[^|\n]*✅', answer_text, _re.MULTILINE))
-        table_missing = len(_re.findall(r'^\|[^|\n]*\|[^|\n]*❌', answer_text, _re.MULTILINE))
-        table_total = table_covered + table_missing
-
+        # Recompute counts from the gaps array — single source of truth.
+        # The LLM populates gaps[] correctly per STEP 4 of the prompt; trust it over
+        # covered_count/total_count fields which the model sometimes miscounts.
         gaps = payload.get("gaps", [])
-        json_covered = payload.get("covered_count", 0)
         json_total = payload.get("total_count", 0)
-
-        # Use table-derived counts if they differ from what's in JSON
-        if table_total > 0 and (table_covered != json_covered or table_total != json_total):
-            _log.warning(
-                f"{tid} [HYBRID_QA] Count mismatch — table says {table_covered}/{table_total}, "
-                f"JSON says {json_covered}/{json_total}. Fixing from table."
-            )
-            pct = round(table_covered / table_total * 100) if table_total else 0
-            payload["covered_count"] = table_covered
-            payload["total_count"] = table_total
-            payload["coverage_pct"] = pct
-            # Patch the summary line in the markdown answer
-            gaps_list = ", ".join(gaps) if gaps else "none"
-            fixed = f"{table_covered} of {table_total} requirements are covered ({pct}%). Missing: {gaps_list}."
-            payload["answer"] = _re.sub(
-                r"\d+ of \d+ requirements? are covered \(\d+%\)[^.\n]*[.\n]?",
-                fixed + "\n",
-                answer_text,
-                count=1,
-            )
+        json_covered = json_total - len(gaps)
+        if json_covered < 0:
+            json_covered = 0
+        pct = round(json_covered / json_total * 100) if json_total else 0
+        payload["covered_count"] = json_covered
+        payload["coverage_pct"] = pct
         meta["token_budget"] = budget
         _log.info(
             f"{tid} [HYBRID_QA] Answer ready — "
