@@ -18,9 +18,12 @@ RAG_QA_SYSTEM = (
     "3. When information is absent write: 'The BRD does not specify this.' "
     "   Do not substitute guesses or best-practices.\n"
     "4. When only partial information is available, state what is covered AND flag what is not.\n\n"
-    "CITATION RULE: after every factual bullet point, add a parenthetical source tag "
-    "using the exact excerpt title, e.g. *(Source: EOMS BRD - Page 6 (Part 12))*. "
-    "Multiple sources for one fact: list all, comma-separated.\n\n"
+    "CITATION RULE: after every factual bullet point:\n"
+    "  a) Add a parenthetical source tag using the exact excerpt title, "
+    "     e.g. *(Source: EOMS BRD - Page 6 (Part 12))*.\n"
+    "  b) Include a short direct quote from the excerpt that supports the fact, formatted as:\n"
+    "     > \"Exact sentence from the BRD.\"\n"
+    "  Multiple sources for one fact: list all, comma-separated.\n\n"
     "CONFIDENCE RULE: at the end of your answer, add a ## Confidence section with:\n"
     "  - Level: High / Medium / Low\n"
     "  - Explanation: one sentence stating how many BRD sections support the answer "
@@ -122,6 +125,10 @@ HYBRID_QA_SYSTEM = (
     "'Would you like me to generate Jira stories for the [N] missing requirements?'\n\n"
     "RULES:\n"
     "  - NEVER say 'potential gap' — make a definitive determination.\n"
+    "  - NEVER invent or guess Jira ticket keys (e.g. EOMS-123). "
+    "    Only cite ticket keys that appear verbatim in the LIVE JIRA TICKETS section.\n"
+    "  - If the LIVE JIRA TICKETS section is empty or says 'Jira not configured', "
+    "    mark EVERY requirement as ❌ Missing with Ticket = 'None'.\n"
     "  - Confidence: High = full Jira history searched, Medium = recent issues only, "
     "    Low = Jira unavailable.\n\n"
     "Return JSON with keys: answer (string, markdown with table + summary + recommendations + follow-up), "
@@ -136,11 +143,18 @@ HYBRID_QA_SYSTEM = (
 
 def hybrid_qa_prompt(question: str, brd_context: str, jira_context: str, project_key: str | None = None) -> str:
     scope = f"ACTIVE PROJECT: {project_key}\n" if project_key else ""
+    jira_unavailable = not jira_context.strip() or "not configured" in jira_context.lower() or "unavailable" in jira_context.lower()
+    jira_section = (
+        "LIVE JIRA TICKETS: [NO DATA — Jira is not configured. Mark ALL requirements as ❌ Missing. "
+        "Do NOT invent ticket keys. Confidence must be Low.]\n"
+        if jira_unavailable
+        else f"LIVE JIRA TICKETS (match each BRD requirement against these — only cite keys that appear here):\n{jira_context}\n"
+    )
     return (
         f"{scope}"
         f"QUESTION:\n{question}\n\n"
         f"BRD REQUIREMENTS (extract each distinct requirement):\n{brd_context}\n\n"
-        f"LIVE JIRA TICKETS (match each BRD requirement against these):\n{jira_context}\n\n"
+        f"{jira_section}\n"
         "For EACH BRD requirement: find a matching Jira ticket or mark as missing. "
         "Produce a coverage table, definitive verdict (X of Y covered), and recommendations. "
         "Do not say 'potential gap' — make a concrete determination. Return JSON only."
