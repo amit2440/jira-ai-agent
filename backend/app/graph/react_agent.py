@@ -1,33 +1,29 @@
 """
-ReAct agent for Q&A flows (rag_qa, jira_qa, hybrid_qa).
+ReAct retrieval layer for Q&A flows (rag_qa, jira_qa, hybrid_qa).
 
-Replaces the three hardcoded node chains with a single LangGraph ReAct loop:
-  LLM decides which tools to call → ToolNode executes → LLM synthesises answer.
+The LLM sees the question + available tools and picks which to call.
+Tools execute once; raw docs are returned split by source (BRD vs Jira).
+Synthesis is handled by the original answer_from_* functions in agents/qa.py
+so prompt quality and confidence scoring are unchanged.
 
-Tools available to the agent:
-  hybrid_search_tool   — BRD hybrid search (BM25 + vector, reranked)
-  bm25_search_tool     — BRD keyword search
-  vector_search_tool   — BRD semantic search
-  jira_search          — Execute JQL against Jira
-  jira_project_health  — Fetch Jira project health summary
-
-Entry point: run_qa_react(question, project_key, flow_hint, run) -> (answer_payload, docs, meta)
+Entry point: run_retrieval_react(question, project_key, flow_hint, _run)
+             -> (brd_docs, jira_docs, meta)
 """
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langgraph.graph import END, START, StateGraph
-from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode
-from typing_extensions import Annotated, TypedDict
-
 from ..config import GROQ_API_KEY, GROQ_MODEL, TEMPERATURE, groq_enabled
-from ..tools.jira import jira_project_health_react, jira_search_react
-from ..tools.retrieval import bm25_search_tool_react, hybrid_search_tool_react, vector_search_tool_react
+from ..tools.jira import jira_project_health, jira_project_health_react, jira_search, jira_search_react
+from ..tools.retrieval import (
+    bm25_search_tool,
+    bm25_search_tool_react,
+    hybrid_search_tool,
+    hybrid_search_tool_react,
+    vector_search_tool,
+    vector_search_tool_react,
+)
 
 _log = logging.getLogger("agent")
 
@@ -39,169 +35,147 @@ _QA_TOOLS = [
     jira_project_health_react,
 ]
 
-_SYSTEM_PROMPT = """You are an AI assistant for a software project. You have access to:
-- BRD (Business Requirements Document) search tools for requirements/documentation questions
-- Jira tools for project status, tickets, and health metrics
+# Map @tool name → plain callable for direct execution after LLM selection
+_TOOL_EXECUTORS: dict[str, Any] = {
+    "hybrid_search_tool_react": hybrid_search_tool,
+    "bm25_search_tool_react": bm25_search_tool,
+    "vector_search_tool_react": vector_search_tool,
+    "jira_search_react": jira_search,
+    "jira_project_health_react": jira_project_health,
+}
 
-Use the most appropriate tool(s) for the question. For BRD questions, prefer hybrid_search_tool.
-For Jira questions, prefer jira_search or jira_project_health. For gap analysis, use both.
+_BRD_TOOLS = {"hybrid_search_tool_react", "bm25_search_tool_react", "vector_search_tool_react"}
+_JIRA_TOOLS = {"jira_search_react", "jira_project_health_react"}
 
-After gathering context, synthesise a clear, grounded answer. Return your final answer as JSON:
-{{
-  "answer": "string — main answer text",
-  "confidence": "high|medium|low",
-  "sources_used": ["list of document titles used"],
-  "gaps": []
-}}
-For hybrid gap analysis, populate "gaps" with a list of missing requirement strings.
-"""
-
-
-class _AgentState(TypedDict):
-    messages: Annotated[list, add_messages]
-    project_key: str
+_RETRIEVAL_SYSTEM = (
+    "You are a retrieval planner. Given a question and available tools, "
+    "select the most appropriate tool(s) to fetch relevant context. "
+    "For BRD/requirements questions use hybrid_search_tool_react. "
+    "For Jira/project status questions use jira_search_react or jira_project_health_react. "
+    "For gap analysis use both BRD and Jira tools. "
+    "Call the tools now — do not answer the question yourself."
+)
 
 
-def _build_react_graph():
+def _get_llm():
     if not groq_enabled():
         return None
-
     from langchain_groq import ChatGroq
-
-    llm = ChatGroq(
+    return ChatGroq(
         api_key=GROQ_API_KEY,
         model=GROQ_MODEL,
-        temperature=TEMPERATURE.get("qa", 0.1),
-        max_tokens=2000,
+        temperature=TEMPERATURE.get("extraction", 0.0),
+        max_tokens=500,
     ).bind_tools(_QA_TOOLS)
 
-    def call_llm(state: _AgentState) -> dict:
-        response = llm.invoke(state["messages"])
-        return {"messages": [response]}
 
-    def should_continue(state: _AgentState) -> str:
-        last = state["messages"][-1]
-        if isinstance(last, AIMessage) and last.tool_calls:
-            return "tools"
-        return END
-
-    tool_node = ToolNode(_QA_TOOLS)
-
-    graph = StateGraph(_AgentState)
-    graph.add_node("llm", call_llm)
-    graph.add_node("tools", tool_node)
-    graph.add_edge(START, "llm")
-    graph.add_conditional_edges("llm", should_continue, {"tools": "tools", END: END})
-    graph.add_edge("tools", "llm")
-    return graph.compile()
+def _normalize_jira_result(result: Any) -> list[dict[str, Any]]:
+    """Convert jira_search / jira_project_health output to doc list."""
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict) and "issues" in result:
+        return [
+            {
+                "title": f"{i.get('key', '')}: {i.get('summary', '')}",
+                "content": f"Key: {i.get('key')} | Status: {i.get('status', 'Unknown')} | Summary: {i.get('summary', '')}",
+                "source": "jira",
+            }
+            for i in result["issues"]
+        ]
+    return []
 
 
-_REACT_GRAPH = None
-
-
-def _get_graph():
-    global _REACT_GRAPH
-    if _REACT_GRAPH is None:
-        _REACT_GRAPH = _build_react_graph()
-    return _REACT_GRAPH
-
-
-def _extract_tool_docs(messages: list) -> list[dict[str, Any]]:
-    """Pull retrieved documents out of ToolMessage results."""
-    docs: list[dict[str, Any]] = []
-    for msg in messages:
-        if not isinstance(msg, ToolMessage):
-            continue
-        try:
-            content = json.loads(msg.content) if isinstance(msg.content, str) else msg.content
-            if isinstance(content, list):
-                for item in content:
-                    if isinstance(item, dict) and ("title" in item or "content" in item):
-                        docs.append(item)
-            elif isinstance(content, dict) and "issues" in content:
-                issues = content["issues"]
-                for issue in issues:
-                    docs.append({
-                        "title": f"{issue.get('key', '')}: {issue.get('summary', '')}",
-                        "content": f"Key: {issue.get('key')} | Status: {issue.get('status', '')} | Summary: {issue.get('summary', '')}",
-                        "source": "jira",
-                    })
-        except Exception:
-            pass
-    return docs
-
-
-def _parse_answer(messages: list) -> dict[str, Any]:
-    """Extract the JSON answer payload from the last AI message."""
-    for msg in reversed(messages):
-        if not isinstance(msg, AIMessage):
-            continue
-        content = str(msg.content)
-        if not content.strip():
-            continue
-        import re
-        match = re.search(r"\{.*\}", content, re.S)
-        if match:
-            try:
-                return json.loads(match.group())
-            except Exception:
-                pass
-        return {"answer": content, "confidence": "medium", "sources_used": [], "gaps": []}
-    return {"answer": "No answer generated.", "confidence": "low", "sources_used": [], "gaps": []}
-
-
-def run_qa_react(
+def run_retrieval_react(
     question: str,
     project_key: str,
     flow_hint: str = "rag_qa",
     _run=None,
-) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """
-    Run the ReAct Q&A agent. Returns (answer_payload, retrieved_docs, meta).
-
-    Falls back to a demo response when Groq is not configured.
+    Let the LLM pick retrieval tools, execute them, return (brd_docs, jira_docs, meta).
+    Falls back to deterministic tool selection when Groq is unavailable.
     """
-    graph = _get_graph()
+    meta = {"model": GROQ_MODEL, "token_usage": {"total_tokens": 0}}
 
-    if graph is None:
-        # Demo mode fallback
-        return (
-            {"answer": "Demo mode — configure GROQ_API_KEY to enable live answers.",
-             "confidence": "low", "sources_used": [], "gaps": []},
-            [],
-            {"model": "demo-template", "token_usage": {"total_tokens": 0}},
-        )
+    llm = _get_llm()
 
-    flow_context = {
-        "rag_qa": "Focus on BRD knowledge base documents.",
-        "jira_qa": "Focus on Jira project data and ticket status.",
-        "hybrid_qa": "Cross-reference BRD requirements against Jira coverage to identify gaps.",
-    }.get(flow_hint, "")
+    if llm is None:
+        # Demo mode — fall back to deterministic retrieval matching old behaviour
+        return _fallback_retrieval(question, project_key, flow_hint)
 
-    system_msg = SystemMessage(content=_SYSTEM_PROMPT)
-    human_msg = HumanMessage(
-        content=f"Project: {project_key}\n{flow_context}\n\nQuestion: {question}"
-    )
+    from langchain_core.messages import HumanMessage, SystemMessage
 
     try:
-        result = graph.invoke(
-            {"messages": [system_msg, human_msg], "project_key": project_key},
-        )
-        messages = result["messages"]
-        answer = _parse_answer(messages)
-        docs = _extract_tool_docs(messages)
+        response = llm.invoke([
+            SystemMessage(content=_RETRIEVAL_SYSTEM),
+            HumanMessage(content=f"Project: {project_key}\nFlow: {flow_hint}\nQuestion: {question}"),
+        ])
 
-        # Count tokens from tool call round-trips (approximate)
-        meta = {
-            "model": GROQ_MODEL,
-            "token_usage": {"total_tokens": 0},
+        usage = getattr(response, "response_metadata", {}).get("token_usage", {})
+        meta["token_usage"] = {
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
         }
-        return answer, docs, meta
+
+        tool_calls = getattr(response, "tool_calls", []) or []
+        if not tool_calls:
+            _log.warning("ReAct retrieval: LLM made no tool calls — falling back to deterministic")
+            return _fallback_retrieval(question, project_key, flow_hint)
+
+        brd_docs: list[dict[str, Any]] = []
+        jira_docs: list[dict[str, Any]] = []
+
+        for call in tool_calls:
+            name = call["name"]
+            args = call.get("args", {})
+            executor = _TOOL_EXECUTORS.get(name)
+            if executor is None:
+                _log.warning(f"ReAct retrieval: unknown tool {name!r} — skipping")
+                continue
+
+            # Inject project_key if the tool accepts it and caller didn't set one
+            if "project_key" in args or name in _JIRA_TOOLS:
+                args.setdefault("project_key", project_key)
+
+            try:
+                result = executor(**args)
+            except Exception as exc:
+                _log.warning(f"ReAct retrieval: tool {name!r} failed — {exc}")
+                continue
+
+            if name in _BRD_TOOLS:
+                if isinstance(result, list):
+                    brd_docs.extend(result)
+            elif name in _JIRA_TOOLS:
+                jira_docs.extend(_normalize_jira_result(result))
+
+        _log.info(
+            f"ReAct retrieval: brd_docs={len(brd_docs)} jira_docs={len(jira_docs)} "
+            f"tools_called={[c['name'] for c in tool_calls]}"
+        )
+        return brd_docs, jira_docs, meta
 
     except Exception as exc:
-        _log.error(f"ReAct agent failed: {exc}", exc_info=True)
-        return (
-            {"answer": f"Agent error: {exc}", "confidence": "low", "sources_used": [], "gaps": []},
-            [],
-            {"model": GROQ_MODEL, "token_usage": {"total_tokens": 0}},
-        )
+        _log.error(f"ReAct retrieval failed: {exc}", exc_info=True)
+        return _fallback_retrieval(question, project_key, flow_hint)
+
+
+def _fallback_retrieval(
+    question: str,
+    project_key: str,
+    flow_hint: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Deterministic fallback — mirrors the old hardcoded node behaviour."""
+    meta = {"model": "demo-template", "token_usage": {"total_tokens": 0}}
+    brd_docs: list[dict[str, Any]] = []
+    jira_docs: list[dict[str, Any]] = []
+
+    if flow_hint in ("rag_qa", "hybrid_qa"):
+        brd_docs = hybrid_search_tool(question, limit=5, project_key=project_key)
+
+    if flow_hint in ("jira_qa", "hybrid_qa"):
+        raw = jira_search(f"project = {project_key} ORDER BY updated DESC", max_results=10)
+        jira_docs = _normalize_jira_result(raw) or jira_project_health(project_key)
+
+    return brd_docs, jira_docs, meta
