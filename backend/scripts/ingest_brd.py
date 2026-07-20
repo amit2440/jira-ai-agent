@@ -53,6 +53,17 @@ def _sync_to_sqlite(chunks, project_key: str) -> None:
             "INSERT INTO knowledge (id, title, content, project_key) VALUES (?, ?, ?, ?)",
             rows,
         )
+        # Sync FTS5 index: delete stale entries then insert fresh
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5("
+            "id UNINDEXED, title, content, project_key UNINDEXED, "
+            "tokenize='porter ascii')"
+        )
+        conn.execute("DELETE FROM knowledge_fts WHERE project_key = ?", (project_key,))
+        conn.executemany(
+            "INSERT INTO knowledge_fts(id, title, content, project_key) VALUES (?, ?, ?, ?)",
+            rows,
+        )
     logging.info(f"SQLite: wrote {len(rows)} chunks for project_key={project_key!r} to {DB_PATH}")
 
 

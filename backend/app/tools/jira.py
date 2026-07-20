@@ -11,7 +11,13 @@ from ..config import JIRA_API_TOKEN, JIRA_BASE_URL, JIRA_EMAIL, JIRA_PROJECT_KEY
 def jira_create_ticket(ticket: dict[str, Any], project_key: str | None = None) -> dict[str, Any]:
     project = project_key or JIRA_PROJECT_KEY
     if not jira_enabled():
-        return {"mode": "demo", "key": f"{project}-101", "url": None, "status": "created"}
+        return {
+            "mode": "unavailable",
+            "key": None,
+            "url": None,
+            "status": "failed",
+            "error": "Jira not configured — set JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN to create tickets.",
+        }
 
     adf_content = [
         {
@@ -82,13 +88,7 @@ def jira_create_ticket(ticket: dict[str, Any], project_key: str | None = None) -
 
 def jira_search(jql: str, max_results: int = 5) -> dict[str, Any]:
     if not jira_enabled():
-        return {
-            "mode": "demo",
-            "issues": [
-                {"key": "DEMO-1", "summary": "Sample onboarding story"},
-                {"key": "DEMO-2", "summary": "Security baseline task"},
-            ],
-        }
+        return {"mode": "unavailable", "issues": [], "error": "Jira not configured."}
 
     url = f"{JIRA_BASE_URL.rstrip('/')}/rest/api/3/search/jql"
     auth = (JIRA_EMAIL, JIRA_API_TOKEN)
@@ -123,15 +123,9 @@ def jira_project_exists(project_key: str) -> bool:
 
 
 def jira_project_health(project_key: str | None = None) -> list[dict[str, Any]]:
-    project = project_key or JIRA_PROJECT_KEY or "DEMO"
+    project = project_key or JIRA_PROJECT_KEY or ""
     if not jira_enabled():
-        return [
-            {"title": "Issue Counts", "content": "Total: 20 | Open: 14 | In Progress: 4 | Done: 6 | Stories: 12 | Bugs: 5 | Tasks: 3", "score": 1.0},
-            {"title": "Open Bugs by Priority", "content": "Critical: 1 (DEMO-15) | High: 2 (DEMO-23, DEMO-31) | Medium: 2 (DEMO-18, DEMO-27) | Low: 0", "score": 1.0},
-            {"title": "Blockers", "content": "1 blocker: DEMO-45 — Waiting for third-party AD API approval.", "score": 1.0},
-            {"title": "Completed Items", "content": "6 items completed. Recent: DEMO-10 (Login flow), DEMO-11 (User registration), DEMO-12 (Role assignment UI).", "score": 1.0},
-            {"title": "Health Indicators", "content": "Completion rate: 30%. Open bugs: 5. Active blockers: 1. Sprint velocity: stable.", "score": 1.0},
-        ]
+        return [{"title": "Jira Unavailable", "content": "Jira not configured — set JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN.", "score": 0.0}]
 
     url = f"{JIRA_BASE_URL.rstrip('/')}/rest/api/3/search/jql"
     auth = (JIRA_EMAIL, JIRA_API_TOKEN)

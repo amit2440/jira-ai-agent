@@ -1,32 +1,27 @@
 import re
 from typing import Any
 
-from rank_bm25 import BM25Okapi
-
-from ..database import documents
+from ..database import fts_search
 
 
-def _tokenize(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9]+", text.lower())
+def _escape_fts(query: str) -> str:
+    """Build a safe FTS5 MATCH expression from a natural language query."""
+    cleaned = re.sub(r'[^\w\s]', ' ', query.lower())
+    tokens = [t for t in cleaned.split() if len(t) > 1]
+    if not tokens:
+        return '""'
+    return " OR ".join(f'"{t}"*' for t in tokens)
 
 
 def bm25_search(query: str, limit: int = 5, project_key: str | None = None) -> list[dict[str, Any]]:
-    docs = documents(project_key)
-    if not docs:
+    fts_query = _escape_fts(query)
+    try:
+        rows = fts_search(fts_query, limit=limit, project_key=project_key)
+    except Exception:
+        # FTS5 query failed (e.g. empty table) — return empty
         return []
-    corpus = [_tokenize(f"{d['title']} {d['content']}") for d in docs]
-    bm25 = BM25Okapi(corpus)
-    scores = bm25.get_scores(_tokenize(query))
-    ranked = sorted(
-        (
-            {
-                **doc,
-                "bm25_score": round(float(score), 4),
-                "score": round(float(score), 4),
-            }
-            for doc, score in zip(docs, scores)
-        ),
-        key=lambda x: x["score"],
-        reverse=True,
-    )
-    return ranked[:limit]
+    return [
+        {**row, "bm25_score": round(-float(row.get("bm25_score", 0)), 4),
+         "score": round(-float(row.get("bm25_score", 0)), 4)}
+        for row in rows
+    ]

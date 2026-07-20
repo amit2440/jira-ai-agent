@@ -77,18 +77,13 @@ def invoke_llm(
         if params.max_tokens is not None:
             max_tokens = params.max_tokens
 
-    # ── DEMO MODE: no Groq key ─────────────────────────────────────────────────
+    # ── LLM UNAVAILABLE: no Groq key ──────────────────────────────────────────
     if not groq_enabled():
-        _log.warning(
-            f"{tid} [LLM_CALL:{_agent_tag}] DEMO MODE — Groq API key not configured. "
-            f"task={task!r} model=demo-template — returning empty response."
+        _log.error(
+            f"{tid} [LLM_CALL:{_agent_tag}] LLM unavailable — GROQ_API_KEY not configured. "
+            f"task={task!r}"
         )
-        return {
-            "content": "",
-            "model": "demo-template",
-            "temperature": temperature,
-            "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        }
+        raise RuntimeError("LLM unavailable — configure GROQ_API_KEY to use this feature.")
 
     from langchain_core.messages import HumanMessage, SystemMessage
     from langchain_groq import ChatGroq

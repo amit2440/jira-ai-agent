@@ -32,13 +32,14 @@ def init_db() -> None:
             "id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, thread_id TEXT, node TEXT, "
             "function_name TEXT, tool TEXT, payload TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
         )
-        # No generic seed data — all knowledge must come from project-tagged BRD ingestion.
-        # Run scripts/ingest_brd.py --project-key <KEY> to populate the knowledge base.
-        
+        # FTS5 virtual table for native BM25 search (standalone, not a content table)
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5("
+            "id UNINDEXED, title, content, project_key UNINDEXED, "
+            "tokenize='porter ascii')"
+        )
         # Remove old generic seed docs (project_key IS NULL) — they contaminate project-scoped queries.
-        # Real knowledge comes only from ingest_brd.py with explicit --project-key.
         conn.execute("DELETE FROM knowledge WHERE project_key IS NULL")
-        # Cleanup previously seeded CSV epics if they exist
         conn.execute("DELETE FROM knowledge WHERE id LIKE 'csv_epic_%'")
 def save_run(run: RunState) -> None:
     with connection() as conn:
@@ -82,7 +83,34 @@ def add_document(doc: KnowledgeDocument) -> KnowledgeDocument:
             "INSERT OR REPLACE INTO knowledge (id, title, content, project_key) VALUES (?, ?, ?, ?)",
             (doc.id, doc.title, doc.content, doc.project_key),
         )
+        # Keep FTS index in sync
+        conn.execute(
+            "INSERT INTO knowledge_fts(id, title, content, project_key) VALUES (?, ?, ?, ?)",
+            (doc.id, doc.title, doc.content, doc.project_key),
+        )
     return doc
+
+
+def fts_search(query: str, limit: int = 5, project_key: str | None = None) -> list[dict]:
+    """Native SQLite FTS5 BM25 search over the knowledge base."""
+    with connection() as conn:
+        if project_key:
+            rows = conn.execute(
+                "SELECT id, title, content, project_key, bm25(knowledge_fts) AS bm25_score "
+                "FROM knowledge_fts "
+                "WHERE knowledge_fts MATCH ? AND project_key = ? "
+                "ORDER BY bm25_score LIMIT ?",
+                (query, project_key, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, title, content, project_key, bm25(knowledge_fts) AS bm25_score "
+                "FROM knowledge_fts "
+                "WHERE knowledge_fts MATCH ? "
+                "ORDER BY bm25_score LIMIT ?",
+                (query, limit),
+            ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def log_execution(
