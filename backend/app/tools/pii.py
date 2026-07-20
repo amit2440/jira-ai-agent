@@ -1,20 +1,34 @@
-import re
 from typing import Any
 
-PII_PATTERNS = {
-    "email": r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b",
-    "phone": r"\b(?:\+?\d[\d .-]{8,}\d)\b",
-    "card": r"\b(?:\d[ -]?){13,16}\b",
-    "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
-}
+from presidio_analyzer import AnalyzerEngine
+from presidio_anonymizer import AnonymizerEngine
 
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+_provider = NlpEngineProvider(nlp_configuration={
+    "nlp_engine_name": "spacy",
+    "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
+})
+_analyzer = AnalyzerEngine(nlp_engine=_provider.create_engine())
+_anonymizer = AnonymizerEngine()
+
+
+_PII_SCORE_THRESHOLD = 0.85
+
+# Entity types that are not sensitive — org/location names in project context are expected
+_PII_IGNORE_TYPES = {"ORGANIZATION", "LOCATION", "DATE_TIME", "NRP"}
 
 def pii_validator(text: str) -> dict[str, Any]:
-    hits = [kind for kind, pattern in PII_PATTERNS.items() if re.search(pattern, text)]
-    return {"safe": not hits, "findings": hits}
+    results = _analyzer.analyze(text=text, language="en")
+    findings = [
+        r.entity_type for r in results
+        if r.score >= _PII_SCORE_THRESHOLD and r.entity_type not in _PII_IGNORE_TYPES
+    ]
+    return {"safe": not findings, "findings": findings}
 
 
 def redact(text: str) -> str:
-    for pattern in PII_PATTERNS.values():
-        text = re.sub(pattern, "[REDACTED]", text)
-    return text
+    results = _analyzer.analyze(text=text, language="en")
+    if not results:
+        return text
+    return _anonymizer.anonymize(text=text, analyzer_results=results).text
