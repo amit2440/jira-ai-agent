@@ -134,8 +134,10 @@ def run_retrieval_react(
                 _log.warning(f"ReAct retrieval: unknown tool {name!r} — skipping")
                 continue
 
-            # Inject project_key if the tool accepts it and caller didn't set one
-            if "project_key" in args or name in _JIRA_TOOLS:
+            # Inject project_key only for tools that accept it
+            if name == "jira_project_health_react":
+                args.setdefault("project_key", project_key)
+            elif name in _BRD_TOOLS:
                 args.setdefault("project_key", project_key)
 
             try:
@@ -149,6 +151,18 @@ def run_retrieval_react(
                     brd_docs.extend(result)
             elif name in _JIRA_TOOLS:
                 jira_docs.extend(_normalize_jira_result(result))
+
+        # For hybrid_qa: always fetch ALL project tickets so coverage analysis is complete.
+        # ReAct agent makes narrow searches; we need the full backlog to avoid false ❌.
+        if flow_hint == "hybrid_qa":
+            broad = jira_search(f"project = {project_key} ORDER BY updated DESC", max_results=50)
+            broad_docs = _normalize_jira_result(broad)
+            # Merge: broad_docs as base, deduplicate by title
+            seen_titles = {d["title"] for d in jira_docs}
+            for d in broad_docs:
+                if d["title"] not in seen_titles:
+                    jira_docs.append(d)
+                    seen_titles.add(d["title"])
 
         _log.info(
             f"ReAct retrieval: brd_docs={len(brd_docs)} jira_docs={len(jira_docs)} "
